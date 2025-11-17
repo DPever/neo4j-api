@@ -1,0 +1,180 @@
+{
+  "info": {
+    "name": "Neo4j API",
+    "_postman_id": "7b0f21e4-9a8c-4e5c-8b58-neo4j-api-demo",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/health",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "health"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Location by Name",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/locations/SPARTA-MUSKEGON",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "locations",
+            "SPARTA-MUSKEGON"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Nominations by Flow Date",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/noms/2025-11-01",
+          "host": ["{{baseUrl}}"],
+          "path": ["noms", "2025-11-01"]
+        }
+      }
+    },
+    {
+      "name": "Get Constrained Nominations by Flow Date)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/constrained-noms/2025-11-01",
+          "host": ["{{baseUrl}}"],
+          "path": ["constrained-noms", "2025-11-01"]
+        }
+      }
+    },
+    {
+      "name": "Get Constrained Nominations History by Location (with before date)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/constrained-noms/SPARTA-MUSKEGON/2025-11-01",
+          "host": ["{{baseUrl}}"],
+          "path": ["constrained-noms", "SPARTA-MUSKEGON", "2025-11-01"]
+        }
+      }
+    },
+    {
+      "name": "List Constraints for a Location at time",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/constraints?location=SPARTA-MUSKEGON&at=2025-11-01T00:00:00Z&limit=25&skip=0",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "constraints"
+          ],
+          "query": [
+            {
+              "key": "location",
+              "value": "SPARTA-MUSKEGON"
+            },
+            {
+              "key": "at",
+              "value": "2025-11-01T00:00:00Z"
+            },
+            {
+              "key": "limit",
+              "value": "25"
+            },
+            {
+              "key": "skip",
+              "value": "0"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Create Constraint (writes disabled by default)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"reason\": \"Maintenance\", \"kind\": \"Capacity\", \"start\": \"2025-11-01T00:00:00Z\", \"end\": null, \"limit\": 1000, \"locationName\": \"SPARTA-MUSKEGON\"}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/constraints",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "constraints"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Bulk: set createdAt = start",
+      "request": {
+        "method": "PATCH",
+        "url": {
+          "raw": "{{baseUrl}}/constraints/set-createdAt-from-start",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "constraints",
+            "set-createdAt-from-start"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Cypher Read (unsafe writes blocked)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"query\": \"MATCH (l:Location) RETURN l.name AS name LIMIT 5\", \"params\": {}}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/cypher/read",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "cypher",
+            "read"
+          ]
+        }
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080"
+    }
+  ]
+}
