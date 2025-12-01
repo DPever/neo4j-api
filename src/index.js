@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
 import neo4j from 'neo4j-driver';
+import swaggerUi from 'swagger-ui-express';
+import swaggerJsdoc from 'swagger-jsdoc';
 
 // ---- Config ----
 const {
@@ -20,6 +22,196 @@ if (!NEO4J_URI || !NEO4J_USERNAME || !NEO4J_PASSWORD) {
 const driver = neo4j.driver(NEO4J_URI, neo4j.auth.basic(NEO4J_USERNAME, NEO4J_PASSWORD));
 const app = express();
 app.use(express.json({ limit: '1mb' }));
+
+// ---- Swagger/OpenAPI ----
+const swaggerOptions = {
+  definition: {
+    openapi: '3.0.3',
+    info: {
+      title: 'Neo4j API',
+      version: '1.0.0',
+      description: 'Endpoints for locations, nominations, and constraints'
+    },
+    servers: [
+      { url: process.env.BASE_URL || `http://localhost:${PORT}` }
+      // add { url: 'https://<your-render-app>.onrender.com' } if you want a fixed server shown
+    ],
+    components: {
+      securitySchemes: {
+        // remove this if you’re not using an API key guard
+        ApiKeyHeader: { type: 'apiKey', in: 'header', name: 'x-api-key' }
+      },
+      schemas: {
+        Constraint: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            reason: { type: 'string' },
+            kind: { type: 'string' },
+            start: { type: 'string', format: 'date-time' },
+            end:   { type: 'string', format: 'date-time', nullable: true },
+            percent: { type: 'number' }
+          }
+        },
+        Nomination: {
+          type: 'object',
+          properties: {
+            nomId: { type: 'integer' },
+            pipeline: { type: 'string' },
+            TA: { type: 'string' },
+            flowDate: { type: 'string', format: 'date' },
+            cycle: { type: 'string' },
+            receiptLocation: { type: 'string' },
+            receiptVolume: { type: 'number' },
+            fuelLoss: { type: 'number' },
+            deliveryLocation: { type: 'string' },
+            deliveryVolume: { type: 'number' },
+            impactedLocations: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  locationName: { type: 'string' },
+                  locationPipeline: { type: 'string' },
+                  constraintStart: { type: 'string', format: 'date-time' },
+                  constraintEnd:   { type: 'string', format: 'date-time', nullable: true },
+                  constraintPercent: { type: 'number' }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    // , security: [{ ApiKeyHeader: [] }] // uncomment if you enforce x-api-key globally
+  },
+  apis: [] // we’re building the spec entirely here (no JSDoc scanning yet)
+};
+
+const swaggerSpec = swaggerJsdoc(swaggerOptions);
+swaggerSpec.paths = {
+  ...(swaggerSpec.paths || {}),
+
+  '/health': {
+    get: {
+      summary: 'Health check',
+      tags: ['system'],
+      responses: {
+        200: {
+          description: 'Service healthy',
+          content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string' } } } } }
+        },
+        500: {
+          description: 'Service error',
+          content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string' }, error: { type: 'string' } } } } }
+        }
+      }
+    }
+  },
+
+  '/locations/{name}': {
+    get: {
+      summary: 'Fetch a Location by exact name',
+      tags: ['locations'],
+      parameters: [
+        { name: 'name', in: 'path', required: true, schema: { type: 'string' }, 
+          description: 'Filter by location name (e.g., MARIETTA)'
+        },
+        { name: 'pipeline', in: 'query', required: false, schema: { type: 'string' }, 
+          description: 'Filter by pipeline name (e.g., ANR, TETCO)'
+        }
+      ],
+      responses: {
+        200: {
+          description: 'Found',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  count: { type: 'integer' },
+                  locations: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        location: { type: 'object' },
+                        degree: { type: 'integer' }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        404: { description: 'Not found' }
+      }
+    }
+  },
+
+  '/noms/{flowDate}': {
+    get: {
+      summary: 'All nominations for a gas day',
+      tags: ['nominations'],
+      parameters: [
+        { name: 'flowDate', in: 'path', required: true,
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2025-11-01'
+        },
+        { name: 'pipeline', in: 'query', required: false, schema: { type: 'string' }, example: 'ANR' }
+      ],
+      responses: {
+        200: {
+          description: 'List of nominations',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              flowDate: { type: 'string', format: 'date' },
+              count: { type: 'integer' },
+              nominations: { type: 'array', items: { $ref: '#/components/schemas/Nomination' } }
+            }
+          } } }
+        },
+        404: { description: 'Not found' }
+      }
+    }
+  },
+
+  '/constrained-noms/{locationName}/{beforeDate}': {
+    get: {
+      summary: 'Nominations that pass through a location and had prior constraints before a date',
+      tags: ['nominations'],
+      parameters: [
+        { name: 'locationName', in: 'path', required: true, schema: { type: 'string' }, example: 'SPARTA-MUSKEGON' },
+        { name: 'beforeDate',  in: 'path', required: true,
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2025-11-01'
+        },
+        { name: 'pipeline', in: 'query', required: false, schema: { type: 'string' }, example: 'ANR' }
+      ],
+      responses: {
+        200: {
+          description: 'Constrained nominations',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              beforeDate: { type: 'string', format: 'date' },
+              count: { type: 'integer' },
+              nominations: { type: 'array', items: { $ref: '#/components/schemas/Nomination' } }
+            }
+          } } }
+        },
+        404: { description: 'Not found' }
+      }
+    }
+  }
+};
+
+// UI at /swagger, and raw JSON at /openapi.json
+app.use('/swagger', swaggerUi.serve, swaggerUi.setup(swaggerSpec, { explorer: true }));
+app.get('/openapi.json', (_req, res) => res.json(swaggerSpec));
+
 
 // ---- Helper Functions ----
 // Helper to standardize sessions/transactions
@@ -77,23 +269,35 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// GET /locations/:name  — fetch a Location by name (exact match)
+// GET /locations/:name?pipeline=ANR
 app.get('/locations/:name', async (req, res) => {
   const { name } = req.params;
+  const { pipeline } = req.query;  // optional
+
   try {
     const result = await runQuery(
-      `MATCH (l:Location {name: $name})
-       OPTIONAL MATCH (l)-[r]-()
-       WITH l, count(r) AS degree
-       RETURN l {.*, id: id(l)} AS location, degree
+      `
+      MATCH (l:Location)
+      WHERE toUpper(l.name) = toUpper($name)
+        ${pipeline ? 'AND l.pipeline = $pipeline' : ''}
+      OPTIONAL MATCH (l)-[r]->(neighbor:Location)
+      RETURN
+        l {.*, id: id(l)} AS location,
+        collect(DISTINCT neighbor.name) AS neighbors
       `,
-      { name }
+      { name, pipeline }
     );
+
     if (result.records.length === 0) {
       return res.status(404).json({ message: 'Not found' });
     }
-    const { location, degree } = result.records[0].toObject();
-    res.json({ location, degree });
+
+    const locations = result.records.map(r => ({
+      ...toPlain(r.get('location')),
+      neighbors: r.get('neighbors')
+    }));
+
+    res.json({ count: locations.length, pipeline, locations });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -103,6 +307,7 @@ app.get('/locations/:name', async (req, res) => {
 // Example: /noms/2025-11-01
 app.get('/noms/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
   const flowDate = req.params.flowDate;
+  const { pipeline } = req.query; // optional
 
   try {
     const result = await runQuery(
@@ -114,6 +319,7 @@ app.get('/noms/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
 
       MATCH (rcpt:Location)-[n:NOMINATED]->(dlv:Location)
       WHERE n.flowDate = d
+        ${pipeline ? 'AND n.pipeline = $pipeline' : ''}
 
       CALL {
         WITH rcpt, dlv, dayStart, dayEnd
@@ -144,7 +350,7 @@ app.get('/noms/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
         }] AS impactedLocations
       ORDER BY n.pipeline, n.nomId
       `,
-      { flowDate }
+      { flowDate, pipeline }
     );
     if (result.records.length === 0) {
       return res.status(404).json({ message: 'Not found' });
@@ -238,6 +444,7 @@ app.get('/constrained-noms/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) =>
 app.get('/constrained-noms/:locationName/:beforeDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
   const locationName = req.params.locationName;
   const beforeDate   = req.params.beforeDate;
+  const { pipeline } = req.query; // optional
 
   // Basic input validation
   if (!locationName || typeof locationName !== 'string') {
@@ -253,6 +460,7 @@ app.get('/constrained-noms/:locationName/:beforeDate(\\d{4}-\\d{2}-\\d{2})', asy
       MATCH (target:Location {name: locName})
       MATCH (rcpt:Location)-[n:NOMINATED]->(dlv:Location)
       WHERE n.flowDate < bDate
+        ${pipeline ? 'AND n.pipeline = $pipeline' : ''}
 
       CALL {
         WITH rcpt, dlv, target
@@ -287,7 +495,7 @@ app.get('/constrained-noms/:locationName/:beforeDate(\\d{4}-\\d{2}-\\d{2})', asy
         c.end             AS constraintEnd
       ORDER BY flowDate DESC, pipeline ASC, TA ASC, cycle DESC
       `,
-      { locationName, beforeDate }
+      { locationName, beforeDate, pipeline }
     );
     if (result.records.length === 0) {
       return res.status(404).json({ message: 'Not found' });

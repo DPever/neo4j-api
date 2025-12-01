@@ -1,180 +1,244 @@
 {
   "info": {
     "name": "Neo4j API",
-    "_postman_id": "7b0f21e4-9a8c-4e5c-8b58-neo4j-api-demo",
+    "_postman_id": "3b5b5a2f-6b00-4a88-9b90-neo4j-api",
+    "description": "Collection for the Neo4j API endpoints (health, locations, nominations, constraints, paths, cypher, swagger).",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080", "type": "string" },
+    { "key": "xApiKey", "value": "", "type": "string" }
+  ],
   "item": [
     {
-      "name": "Health",
+      "name": "System / Health",
       "request": {
         "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/health",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "health"
-          ]
-        }
+        "header": [
+          { "key": "x-api-key", "value": "{{xApiKey}}", "type": "text", "disabled": true }
+        ],
+        "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] }
       }
     },
     {
-      "name": "Get Location by Name",
+      "name": "System / OpenAPI JSON",
       "request": {
         "method": "GET",
-        "url": {
-          "raw": "{{baseUrl}}/locations/SPARTA-MUSKEGON",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "locations",
-            "SPARTA-MUSKEGON"
-          ]
-        }
+        "header": [
+          { "key": "x-api-key", "value": "{{xApiKey}}", "type": "text", "disabled": true }
+        ],
+        "url": { "raw": "{{baseUrl}}/openapi.json", "host": ["{{baseUrl}}"], "path": ["openapi.json"] }
       }
     },
     {
-      "name": "Get Nominations by Flow Date",
+      "name": "System / Swagger UI",
       "request": {
         "method": "GET",
+        "header": [
+          { "key": "x-api-key", "value": "{{xApiKey}}", "type": "text", "disabled": true }
+        ],
+        "url": { "raw": "{{baseUrl}}/swagger", "host": ["{{baseUrl}}"], "path": ["swagger"] }
+      }
+    },
+    {
+      "name": "Locations / Get by name",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "x-api-key", "value": "{{xApiKey}}", "type": "text", "disabled": true }
+        ],
         "url": {
-          "raw": "{{baseUrl}}/noms/2025-11-01",
+          "raw": "{{baseUrl}}/locations/{{name}}?pipeline={{pipeline}}",
           "host": ["{{baseUrl}}"],
-          "path": ["noms", "2025-11-01"]
-        }
-      }
-    },
-    {
-      "name": "Get Constrained Nominations by Flow Date)",
-      "request": {
-        "method": "GET",
-        "url": {
-          "raw": "{{baseUrl}}/constrained-noms/2025-11-01",
-          "host": ["{{baseUrl}}"],
-          "path": ["constrained-noms", "2025-11-01"]
-        }
-      }
-    },
-    {
-      "name": "Get Constrained Nominations History by Location (with before date)",
-      "request": {
-        "method": "GET",
-        "url": {
-          "raw": "{{baseUrl}}/constrained-noms/SPARTA-MUSKEGON/2025-11-01",
-          "host": ["{{baseUrl}}"],
-          "path": ["constrained-noms", "SPARTA-MUSKEGON", "2025-11-01"]
-        }
-      }
-    },
-    {
-      "name": "List Constraints for a Location at time",
-      "request": {
-        "method": "GET",
-        "url": {
-          "raw": "{{baseUrl}}/constraints?location=SPARTA-MUSKEGON&at=2025-11-01T00:00:00Z&limit=25&skip=0",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "constraints"
-          ],
+          "path": ["locations", "{{name}}"],
           "query": [
-            {
-              "key": "location",
-              "value": "SPARTA-MUSKEGON"
-            },
-            {
-              "key": "at",
-              "value": "2025-11-01T00:00:00Z"
-            },
-            {
-              "key": "limit",
-              "value": "25"
-            },
-            {
-              "key": "skip",
-              "value": "0"
-            }
+            { "key": "pipeline", "value": "{{pipeline}}", "disabled": true }
           ]
+        },
+        "description": "Example: /locations/MARIETTA or /locations/MARIETTA?pipeline=ANR"
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": { "exec": ["// Set an example default for name if not provided", "pm.variables.set('name', pm.variables.get('name') || 'MARIETTA');"], "type": "text/javascript" }
         }
+      ]
+    },
+    {
+      "name": "Noms / By flowDate",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "x-api-key", "value": "{{xApiKey}}", "type": "text", "disabled": true }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/noms/{{flowDate}}?pipeline={{pipeline}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["noms", "{{flowDate}}"],
+          "query": [
+            { "key": "pipeline", "value": "{{pipeline}}", "disabled": true }
+          ]
+        },
+        "description": "flowDate must be YYYY-MM-DD (e.g., 2025-11-01)"
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": { "exec": ["pm.variables.set('flowDate', pm.variables.get('flowDate') || '2025-11-01');"], "type": "text/javascript" }
+        }
+      ]
+    },
+    {
+      "name": "Constrained Noms / By flowDate",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "x-api-key", "value": "{{xApiKey}}", "type": "text", "disabled": true }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/constrained-noms/{{flowDate}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["constrained-noms", "{{flowDate}}"]
+        },
+        "description": "All constrained nominations for a given gas day."
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": { "exec": ["pm.variables.set('flowDate', pm.variables.get('flowDate') || '2025-11-01');"], "type": "text/javascript" }
+        }
+      ]
+    },
+    {
+      "name": "Constrained Noms / Through location before date",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "x-api-key", "value": "{{xApiKey}}", "type": "text", "disabled": true }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/constrained-noms/{{locationName}}/{{beforeDate}}?pipeline={{pipeline}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["constrained-noms", "{{locationName}}", "{{beforeDate}}"],
+          "query": [
+            { "key": "pipeline", "value": "{{pipeline}}", "disabled": true }
+          ]
+        },
+        "description": "Find nominations that pass through a specific location and had constraints prior to a date."
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "exec": [
+              "pm.variables.set('locationName', pm.variables.get('locationName') || 'SPARTA-MUSKEGON');",
+              "pm.variables.set('beforeDate', pm.variables.get('beforeDate') || '2025-11-01');"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Graph / Path between locations",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "x-api-key", "value": "{{xApiKey}}", "type": "text", "disabled": true }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/path?from={{from}}&to={{to}}&maxHops={{maxHops}}&at={{at}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["path"],
+          "query": [
+            { "key": "from", "value": "{{from}}" },
+            { "key": "to", "value": "{{to}}" },
+            { "key": "maxHops", "value": "{{maxHops}}", "disabled": true },
+            { "key": "at", "value": "{{at}}", "disabled": true }
+          ]
+        },
+        "description": "Returns nodes and relationships for a path. Optional: maxHops, at (ISO)."
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "exec": [
+              "pm.variables.set('from', pm.variables.get('from') || 'SPARTA-MUSKEGON');",
+              "pm.variables.set('to', pm.variables.get('to') || 'PATTERSON/TRUNKLINE DEL');"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Constraints / List (global or by location)",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "x-api-key", "value": "{{xApiKey}}", "type": "text", "disabled": true }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/constraints?location={{location}}&at={{at}}&skip={{skip}}&limit={{limit}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["constraints"],
+          "query": [
+            { "key": "location", "value": "{{location}}", "disabled": true },
+            { "key": "at", "value": "{{at}}", "disabled": true },
+            { "key": "skip", "value": "{{skip}}", "disabled": true },
+            { "key": "limit", "value": "{{limit}}", "disabled": true }
+          ]
+        },
+        "description": "Lists constraints; optionally filter by location name, active at time, and paging."
       }
     },
     {
-      "name": "Create Constraint (writes disabled by default)",
+      "name": "Constraints / Create",
       "request": {
         "method": "POST",
         "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          }
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "x-api-key", "value": "{{xApiKey}}", "type": "text", "disabled": true }
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\"reason\": \"Maintenance\", \"kind\": \"Capacity\", \"start\": \"2025-11-01T00:00:00Z\", \"end\": null, \"limit\": 1000, \"locationName\": \"SPARTA-MUSKEGON\"}"
+          "raw": "{\n  \"reason\": \"Maintenance\",\n  \"kind\": \"Outage\",\n  \"start\": \"2025-11-01T00:00:00Z\",\n  \"end\": \"2025-11-02T00:00:00Z\",\n  \"limit\": 80,\n  \"locationName\": \"SPARTA-MUSKEGON\"\n}"
         },
-        "url": {
-          "raw": "{{baseUrl}}/constraints",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "constraints"
-          ]
-        }
+        "url": { "raw": "{{baseUrl}}/constraints", "host": ["{{baseUrl}}"], "path": ["constraints"] },
+        "description": "Requires ENABLE_WRITES=true on the server."
       }
     },
     {
-      "name": "Bulk: set createdAt = start",
+      "name": "Constraints / Set createdAt from start",
       "request": {
         "method": "PATCH",
+        "header": [
+          { "key": "x-api-key", "value": "{{xApiKey}}", "type": "text", "disabled": true }
+        ],
         "url": {
           "raw": "{{baseUrl}}/constraints/set-createdAt-from-start",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "constraints",
-            "set-createdAt-from-start"
-          ]
-        }
+          "host": ["{{baseUrl}}"],
+          "path": ["constraints", "set-createdAt-from-start"]
+        },
+        "description": "One-off utility to backfill createdAt; requires ENABLE_WRITES=true."
       }
     },
     {
-      "name": "Cypher Read (unsafe writes blocked)",
+      "name": "Cypher / Read (parameterized)",
       "request": {
         "method": "POST",
         "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          }
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "x-api-key", "value": "{{xApiKey}}", "type": "text", "disabled": true }
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\"query\": \"MATCH (l:Location) RETURN l.name AS name LIMIT 5\", \"params\": {}}"
+          "raw": "{\n  \"query\": \"MATCH (l:Location) RETURN l.name AS name LIMIT $n\",\n  \"params\": { \"n\": 5 }\n}"
         },
-        "url": {
-          "raw": "{{baseUrl}}/cypher/read",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "cypher",
-            "read"
-          ]
-        }
+        "url": { "raw": "{{baseUrl}}/cypher/read", "host": ["{{baseUrl}}"], "path": ["cypher", "read"] },
+        "description": "Read-only guard blocks CREATE/MERGE/DELETE/SET/REMOVE/FOREACH."
       }
-    }
-  ],
-  "variable": [
-    {
-      "key": "baseUrl",
-      "value": "http://localhost:8080"
     }
   ]
 }
