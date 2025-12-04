@@ -1,6 +1,6 @@
 {
   "info": {
-    "name": "Neo4j API",
+    "name": "Gas Scheduling Optimization",
     "_postman_id": "3b5b5a2f-6b00-4a88-9b90-neo4j-api",
     "description": "Collection for the Neo4j API endpoints (health, locations, nominations, constraints, paths, cypher, swagger).",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"

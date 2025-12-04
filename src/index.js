@@ -28,7 +28,7 @@ const swaggerOptions = {
   definition: {
     openapi: '3.0.3',
     info: {
-      title: 'Neo4j API',
+      title: 'Gas Scheduling Optimization API',
       version: '1.0.0',
       description: 'Endpoints for locations, nominations, and constraints'
     },
@@ -80,6 +80,18 @@ const swaggerOptions = {
               }
             }
           }
+        },
+        OperationalFlow: {
+          type: 'object',
+          properties: {
+            pipeline: { type: 'string' },
+            locationNumber: { type: 'integer' },
+            flowDate: { type: 'string', format: 'date-time' },
+            cycle: { type: 'string' },
+            operationalCapacity: { type: 'number' },
+            scheduledVolume: { type: 'number' },
+            utilizationPercent: { type: 'number' }
+          }
         }
       }
     }
@@ -95,7 +107,7 @@ swaggerSpec.paths = {
   '/health': {
     get: {
       summary: 'Health check',
-      tags: ['system'],
+      tags: ['System'],
       responses: {
         200: {
           description: 'Service healthy',
@@ -109,16 +121,51 @@ swaggerSpec.paths = {
     }
   },
 
-  '/locations/{name}': {
+  '/pipelines': {
     get: {
-      summary: 'Fetch a Location by exact name',
-      tags: ['locations'],
-      parameters: [
-        { name: 'name', in: 'path', required: true, schema: { type: 'string' }, 
-          description: 'Filter by location name (e.g., MARIETTA)'
+      summary: 'List of pipelines',
+      tags: ['Reference Data'],
+      responses: {
+        200: {
+          description: 'Found',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  count: { type: 'integer' },
+                  pipelines: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        pipeline: { type: 'object' }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
         },
-        { name: 'pipeline', in: 'query', required: false, schema: { type: 'string' }, 
+        404: { description: 'Not found' }
+      }
+    }
+  },
+
+  '/locations/{pipeline}': {
+    get: {
+      summary: 'Locations for a pipeline',
+      tags: ['Reference Data'],
+      parameters: [
+        { name: 'pipeline', in: 'path', required: true, schema: { type: 'string' }, 
           description: 'Filter by pipeline name (e.g., ANR, TETCO)'
+        },
+        { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 100 }, 
+          description: 'maximum number of locations to return', example: '100'
+        },
+        { name: 'skip', in: 'query', required: false, schema: { type: 'integer', default: 0 }, 
+          description: 'number of locations to skip for pagination', example: '0'
         }
       ],
       responses: {
@@ -135,8 +182,7 @@ swaggerSpec.paths = {
                     items: {
                       type: 'object',
                       properties: {
-                        location: { type: 'object' },
-                        degree: { type: 'integer' }
+                        location: { type: 'object' }
                       }
                     }
                   }
@@ -150,16 +196,61 @@ swaggerSpec.paths = {
     }
   },
 
-  '/noms/{flowDate}': {
+  '/pipeline-segments/{pipeline}': {
     get: {
-      summary: 'All nominations for a gas day',
-      tags: ['nominations'],
+      summary: 'List of pipeline segments for a pipeline',
+      tags: ['Reference Data'],
       parameters: [
+        { name: 'pipeline', in: 'path', required: true, schema: { type: 'string' }, 
+          description: 'Filter by pipeline name (e.g., ANR, TETCO)'
+        },
+        { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 100 }, 
+          description: 'maximum number of segments to return', example: '100'
+        },
+        { name: 'skip', in: 'query', required: false, schema: { type: 'integer', default: 0 }, 
+          description: 'number of segments to skip for pagination', example: '0'
+        }
+      ],
+      responses: {
+        200: {
+          description: 'Found',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  count: { type: 'integer' },
+                  segments: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        segment: { type: 'object' }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        404: { description: 'Not found' }
+      }
+    }
+  },
+
+  '/noms/{pipeline}/{flowDate}': {
+    get: {
+      summary: 'All nominations on a pipeline for a gas day',
+      tags: ['Nominations'],
+      parameters: [
+        { name: 'pipeline', in: 'path', required: true, schema: { type: 'string' }, 
+          description: 'Filter by pipeline name (e.g., ANR, TETCO)'
+        },
         { name: 'flowDate', in: 'path', required: true,
           schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
           example: '2025-11-01'
-        },
-        { name: 'pipeline', in: 'query', required: false, schema: { type: 'string' }, example: 'ANR' }
+        }
       ],
       responses: {
         200: {
@@ -178,10 +269,50 @@ swaggerSpec.paths = {
     }
   },
 
-  '/constrained-noms/{locationName}/{beforeDate}': {
+  '/volumes/historical-flow/{pipeline}/{startDate}/{endDate}': {
+    get: {
+      summary: 'Historic flow volumes and operational capacity at a location for a pipeline and date range',
+      tags: ['Volume'],
+      parameters: [
+        { name: 'pipeline', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'startDate',  in: 'path', required: true,
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2025-11-01'
+        },
+        { name: 'endDate',  in: 'path', required: true,
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2025-11-30'
+        },
+        { name: 'locationNumber', in: 'query', required: false, schema: { type: 'integer' } },
+        { name: 'cycle', in: 'query', required: false, schema: { type: 'string' }, description: 'Filter by cycle (e.g., TIM, EVN, ID1, ID2, ID3)' },
+        { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 100 }, 
+          description: 'maximum number of flow rows to return', example: '100'
+        },
+        { name: 'skip', in: 'query', required: false, schema: { type: 'integer', default: 0 }, 
+          description: 'number of flow rows to skip for pagination', example: '0'
+        }
+      ],
+      responses: {
+        200: {
+          description: 'Operational flows',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              params: { type: 'object' },
+              count: { type: 'integer' },
+              flows: { type: 'array', items: { $ref: '#/components/schemas/OperationalFlow' } },
+              page: { type: 'object' }
+            }
+          } } }
+        }
+      }
+    }
+  },
+
+  '/notices/constrained-noms/{locationName}/{beforeDate}': {
     get: {
       summary: 'Nominations that pass through a location and had prior constraints before a date',
-      tags: ['nominations'],
+      tags: ['Notices'],
       parameters: [
         { name: 'locationName', in: 'path', required: true, schema: { type: 'string' }, example: 'SPARTA-MUSKEGON' },
         { name: 'beforeDate',  in: 'path', required: true,
@@ -269,45 +400,122 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// GET /locations/:name?pipeline=ANR
-app.get('/locations/:name', async (req, res) => {
-  const { name } = req.params;
-  const { pipeline } = req.query;  // optional
-
+// GET /pipelines  — fetch all pipelines
+app.get('/pipelines', async (req, res) => {
   try {
     const result = await runQuery(
       `
-      MATCH (l:Location)
-      WHERE toUpper(l.name) = toUpper($name)
-        ${pipeline ? 'AND l.pipeline = $pipeline' : ''}
-      OPTIONAL MATCH (l)-[r]->(neighbor:Location)
-      RETURN
-        l {.*, id: id(l)} AS location,
-        collect(DISTINCT neighbor.name) AS neighbors
-      `,
-      { name, pipeline }
+      MATCH (n:Pipeline) RETURN n.code, n.name, n.operator
+      ORDER BY n.name
+      `
     );
 
-    if (result.records.length === 0) {
-      return res.status(404).json({ message: 'Not found' });
-    }
+    // Map records to plain JS objects
+    const pipelines = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
 
-    const locations = result.records.map(r => ({
-      ...toPlain(r.get('location')),
-      neighbors: r.get('neighbors')
-    }));
-
-    res.json({ count: locations.length, pipeline, locations });
+    res.json({ count: pipelines.length, pipelines });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// GET /noms/:flowDate  — fetch all nominations for a given flow date (YYYY-MM-DD)
-// Example: /noms/2025-11-01
-app.get('/noms/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
+// GET /locations/:pipeline?limit=100&skip=0  — fetch all Locations for a given pipeline w/ pagination
+// Example: /locations/ANR?limit=50&skip=0
+app.get('/locations/:pipeline', async (req, res) => {
+  const pipeline = req.params.pipeline;
+  const limit = parseInt(req.query.limit) || 100;
+  const skip  = parseInt(req.query.skip)  || 0;
+
+  // Basic input validation
+  if (!pipeline || typeof pipeline !== 'string') {
+    return res.status(400).json({ error: "pipeline is required" });
+  }
+  try {
+    const result = await runQuery(
+      `
+      MATCH (l:Location)
+      WHERE l.pipeline = $pipeline
+      RETURN
+        l.name        AS name,
+        l.number      AS number,
+        l.type        AS type,
+        l.zone        AS zone,
+        l.area        AS area,
+        l.direction   AS direction,
+        l.up_down_name AS upDownName,
+        l.up_down_number AS upDownNumber,
+        l.position AS position
+      ORDER BY l.number SKIP toInteger($skip) LIMIT toInteger($limit)
+      `,
+      { pipeline, limit, skip }
+    );
+
+    // Map records to plain JS objects
+    const locations = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    res.json({ count: locations.length, pipeline, locations, page: { skip: Number(skip), limit: Number(limit) } });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /pipeline-segments/:pipeline?limit=100&skip=0  — fetch all segments for a given pipeline w/ pagination
+// Example: /pipeline-segments/ANR?limit=50&skip=0
+app.get('/pipeline-segments/:pipeline', async (req, res) => {
+  const pipeline = req.params.pipeline;
+  const limit = parseInt(req.query.limit) || 100;
+  const skip  = parseInt(req.query.skip)  || 0;
+
+  // Basic input validation
+  if (!pipeline || typeof pipeline !== 'string') {
+    return res.status(400).json({ error: "pipeline is required" });
+  }
+  try {
+    const result = await runQuery(
+      `
+      MATCH (src:Location)-[r:Segment_Locations]->(dst:Location)
+      WHERE r.pipeline = $pipeline
+      RETURN
+        id(r) AS segmentId, 
+        src.name AS sourceName, src.number as sourceNumber,
+        dst.name AS destName, dst.number as destNumber
+      ORDER BY src.number, dst.number SKIP toInteger($skip) LIMIT toInteger($limit)
+      `,
+      { pipeline, limit, skip }
+    );
+
+    // Map records to plain JS objects
+    const segments = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    res.json({ pipeline, count: segments.length, segments, page: { skip: Number(skip), limit: Number(limit) } });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /noms/:pipeline/:flowDate  — fetch all nominations on a pipeline for a given flow date (YYYY-MM-DD)
+// Example: /noms/ANR/2025-11-01
+app.get('/noms/:pipeline/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
+  const pipeline = req.params.pipeline;
   const flowDate = req.params.flowDate;
-  const { pipeline } = req.query; // optional
 
   try {
     const result = await runQuery(
@@ -318,8 +526,7 @@ app.get('/noms/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
         datetime({date: d}) + duration('P1D') - duration('PT1S') AS dayEnd
 
       MATCH (rcpt:Location)-[n:NOMINATED]->(dlv:Location)
-      WHERE n.flowDate = d
-        ${pipeline ? 'AND n.pipeline = $pipeline' : ''}
+      WHERE n.pipeline = $pipeline AND n.flowDate = d
 
       CALL {
         WITH rcpt, dlv, dayStart, dayEnd
@@ -350,11 +557,8 @@ app.get('/noms/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
         }] AS impactedLocations
       ORDER BY n.pipeline, n.nomId
       `,
-      { flowDate, pipeline }
+      { pipeline, flowDate }
     );
-    if (result.records.length === 0) {
-      return res.status(404).json({ message: 'Not found' });
-    }
 
     // Map records to plain JS objects
     const nominations = result.records.map(r => {
@@ -365,15 +569,15 @@ app.get('/noms/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
       return obj;
     });
 
-    res.json({ flowDate, count: nominations.length, nominations });
+    res.json({ pipeline, flowDate, count: nominations.length, nominations });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// GET /constrained-noms/:flowDate  — fetch all constrained nominations for a given flow date (YYYY-MM-DD)
-// Example: /constrained-noms/2025-11-01
-app.get('/constrained-noms/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
+// GET /notices/constrained-noms/:flowDate  — fetch all constrained nominations for a given flow date (YYYY-MM-DD)
+// Example: /notices/constrained-noms/2025-11-01
+app.get('/notices/constrained-noms/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
   const flowDate = req.params.flowDate;
 
   try {
@@ -439,9 +643,9 @@ app.get('/constrained-noms/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) =>
   }
 });
 
-// GET /constrained-noms/:locationName/:beforeDate  — fetch all constrained nominations at a location prior to date (YYYY-MM-DD)
-// Example: /constrained-noms/SPARTA-MUSKEGON/2025-11-01
-app.get('/constrained-noms/:locationName/:beforeDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
+// GET /notices/constrained-noms/:locationName/:beforeDate  — fetch all constrained nominations at a location prior to date (YYYY-MM-DD)
+// Example: /notices/constrained-noms/SPARTA-MUSKEGON/2025-11-01
+app.get('/notices/constrained-noms/:locationName/:beforeDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
   const locationName = req.params.locationName;
   const beforeDate   = req.params.beforeDate;
   const { pipeline } = req.query; // optional
@@ -511,6 +715,52 @@ app.get('/constrained-noms/:locationName/:beforeDate(\\d{4}-\\d{2}-\\d{2})', asy
     });
 
     res.json({ beforeDate, count: nominations.length, nominations });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /volumes/historical-flow/:pipeline/:startDate/:endDate?limit=100&skip=0  — fetch meter volumes for a pipeline and date range w/ pagination
+// Example: /volumes/historical-flow/ANR?limit=50&skip=0
+app.get('/volumes/historical-flow/:pipeline/:startDate(\\d{4}-\\d{2}-\\d{2})/:endDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
+  const pipeline = req.params.pipeline;
+  const startDate = req.params.startDate;
+  const endDate = req.params.endDate;
+  const limit = parseInt(req.query.limit) || 100;
+  const skip  = parseInt(req.query.skip)  || 0;
+  const locationNumber = parseInt(req.query.locationNumber);  // optional
+  const cycle = req.query.cycle; // optional
+
+  try {
+    const result = await runQuery(
+      `
+      MATCH (o:OperationalFlow)
+      WHERE o.pipeline = $pipeline AND o.flowDate >= date($startDate) AND o.flowDate <= date($endDate)
+        ${locationNumber ? 'AND o.locationNumber = $locationNumber' : ''}
+        ${cycle ? 'AND o.cycle = $cycle' : ''}
+      RETURN
+        o.pipeline              AS pipeline,
+        o.locationNumber        AS locationNumber,
+        o.flowDate              AS flowDate,
+        o.cycle                 AS cycle,
+        o.operationalCapacity   AS operationalCapacity,
+        o.scheduledVolume       AS scheduledVolume,
+        o.utilization           AS utilizationPerCent
+      ORDER BY o.pipeline, o.locationNumber, o.flowDate, o.cycle SKIP toInteger($skip) LIMIT toInteger($limit)
+      `,
+      { pipeline, startDate, endDate, limit, skip, locationNumber, cycle }
+    );
+
+    // Map records to plain JS objects
+    const flows = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    res.json({ params: { pipeline, startDate, endDate, locationNumber, cycle }, count: flows.length, flows, page: { skip: Number(skip), limit: Number(limit) } });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
