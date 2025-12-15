@@ -10,7 +10,7 @@ const {
   NEO4J_USERNAME,
   NEO4J_PASSWORD,
   PORT = 8080,
-  ENABLE_WRITES = 'false',
+  ENABLE_WRITES = 'true',
 } = process.env;
 
 if (!NEO4J_URI || !NEO4J_USERNAME || !NEO4J_PASSWORD) {
@@ -42,6 +42,15 @@ const swaggerOptions = {
         ApiKeyHeader: { type: 'apiKey', in: 'header', name: 'x-api-key' }
       },
       schemas: {
+        Pipeline: {
+          type: 'object',
+          properties: {
+            code: { type: 'string' },
+            name: { type: 'string' },
+            operator: { type: 'string' },
+            tspId: { type: 'string' }
+          }
+        },
         Constraint: {
           type: 'object',
           properties: {
@@ -135,20 +144,56 @@ swaggerSpec.paths = {
                 properties: {
                   count: { type: 'integer' },
                   pipelines: {
-                    type: 'array',
-                    items: {
-                      type: 'object',
-                      properties: {
-                        pipeline: { type: 'object' }
-                      }
-                    }
+                    type: 'array', items: { $ref: '#/components/schemas/Pipeline' } 
                   }
                 }
               }
             }
           }
+        }
+      },
+      404: { description: 'Not found' }
+    }
+  },
+
+  '/pipelines/{code}': {
+    put: {
+      summary: 'Update (or Insert) a pipeline where code is the logical key for updates',
+      tags: ['Reference Data'],
+      parameters: [
+      {
+        name: 'code',
+        in: 'path',
+        required: true,
+        schema: { type: 'string' },
+        example: 'ANR'
+      }
+      ],
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            schema: { $ref: '#/components/schemas/Pipeline' },
+            example: {
+              code: 'ANR',
+              name: 'ANR Pipeline',
+              operator: 'TC Energy',
+              tspId: '006958581'
+            }
+          }
+        }
+      },
+      responses: {
+        200: {
+          description: 'Updated',
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/Pipeline' }
+            }
+          }
         },
-        404: { description: 'Not found' }
+        400: { description: 'Invalid request body' },
+        500: { description: 'Server error' }
       }
     }
   },
@@ -269,6 +314,33 @@ swaggerSpec.paths = {
     }
   },
 
+  '/volumes/firm-transport/{pipeline}': {
+    get: {
+      summary: 'Firm transport for a pipeline and as of date',
+      tags: ['Volume'],
+      parameters: [
+        { name: 'pipeline', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'asOfDate', in: 'query', required: false, 
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2025-11-01'
+        }
+      ],
+      responses: {
+        200: {
+          description: 'Firm Transportation',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              params: { type: 'object' },
+              count: { type: 'integer' },
+              contracts: { type: 'array', items: { type: 'object' } }
+            }
+          } } }
+        }
+      }
+    }
+  },
+
   '/volumes/historical-flow/{pipeline}/{startDate}/{endDate}': {
     get: {
       summary: 'Historic flow volumes and operational capacity at a location for a pipeline and date range',
@@ -309,6 +381,44 @@ swaggerSpec.paths = {
     }
   },
 
+  '/prices/{pipeline}/{startDate}/{endDate}': {
+    get: {
+      summary: 'Redion based prices for a pipeline and date range',
+      tags: ['Prices'],
+      parameters: [
+        { name: 'pipeline', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'startDate',  in: 'path', required: true,
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2025-11-01'
+        },
+        { name: 'endDate',  in: 'path', required: true,
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2025-11-30'
+        },
+        { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 100 }, 
+          description: 'maximum number of flow rows to return', example: '100'
+        },
+        { name: 'skip', in: 'query', required: false, schema: { type: 'integer', default: 0 }, 
+          description: 'number of flow rows to skip for pagination', example: '0'
+        }
+      ],
+      responses: {
+        200: {
+          description: 'Prices',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              params: { type: 'object' },
+              count: { type: 'integer' },
+              prices: { type: 'array', items: { type: 'object' } },
+              page: { type: 'object' }
+            }
+          } } }
+        }
+      }
+    }
+  },
+
   '/notices/constrained-noms/{locationName}/{beforeDate}': {
     get: {
       summary: 'Nominations that pass through a location and had prior constraints before a date',
@@ -330,6 +440,82 @@ swaggerSpec.paths = {
               beforeDate: { type: 'string', format: 'date' },
               count: { type: 'integer' },
               nominations: { type: 'array', items: { $ref: '#/components/schemas/Nomination' } }
+            }
+          } } }
+        },
+        404: { description: 'Not found' }
+      }
+    }
+  },
+
+  
+  '/notices/{pipeline}': {
+    get: {
+      summary: 'Notices on a pipeline, optionally filtered by noticeType and time',
+      tags: ['Notices'],
+      parameters: [
+        { name: 'pipeline', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'noticeType', in: 'query', required: false, schema: { type: 'string' }, description: 'noticeType (e.g., Capacity Constraint, Maintenance Operational Flow)' },
+        { name: 'asOf',  in: 'query', required: false,
+          schema: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}(?:T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})?)?$' },
+          examples: {
+            date: { value: '2025-11-01' },
+            dateTime: { value: '2025-11-01T15:30:00Z' }
+          }
+        },
+        { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 100 }, 
+          description: 'maximum number of flow rows to return', example: '100'
+        },
+        { name: 'skip', in: 'query', required: false, schema: { type: 'integer', default: 0 }, 
+          description: 'number of flow rows to skip for pagination', example: '0'
+        }
+      ],
+      responses: {
+        200: {
+          description: 'Notices',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              beforeDate: { type: 'string', format: 'date' },
+              count: { type: 'integer' },
+              notices: { type: 'array', items: { $ref: '#/components/schemas/Nomination' } }
+            }
+          } } }
+        }
+      }
+    }
+  },
+
+  '/notices/constraints/{pipeline}': {
+    get: {
+      summary: 'Constraints on a pipeline, optionally filtered by location and time',
+      tags: ['Notices'],
+      parameters: [
+        { name: 'pipeline', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'location', in: 'query', required: false, schema: { type: 'string' }, description: 'Location name (e.g., SPARTA-MUSKEGON)' },
+        { name: 'asOf',  in: 'query', required: false,
+          schema: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}(?:T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})?)?$' },
+          examples: {
+            date: { value: '2025-11-01' },
+            dateTime: { value: '2025-11-01T15:30:00Z' }
+          }
+        },
+        { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 100 }, 
+          description: 'maximum number of flow rows to return', example: '100'
+        },
+        { name: 'skip', in: 'query', required: false, schema: { type: 'integer', default: 0 }, 
+          description: 'number of flow rows to skip for pagination', example: '0'
+        }
+      ],
+      responses: {
+        200: {
+          description: 'Constraints',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              beforeDate: { type: 'string', format: 'date' },
+              count: { type: 'integer' },
+              constraints: { type: 'array', items: { $ref: '#/components/schemas/Nomination' } }
             }
           } } }
         },
@@ -405,7 +591,12 @@ app.get('/pipelines', async (req, res) => {
   try {
     const result = await runQuery(
       `
-      MATCH (n:Pipeline) RETURN n.code, n.name, n.operator
+      MATCH (n:Pipeline) 
+      RETURN
+        n.code        as code,
+        n.name        as name,
+        n.operator    as operator,
+        n.tspId       as tspId
       ORDER BY n.name
       `
     );
@@ -420,6 +611,54 @@ app.get('/pipelines', async (req, res) => {
     });
 
     res.json({ count: pipelines.length, pipelines });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PUT /pipelines/:code  — upsert a single pipeline
+app.put('/pipelines/:code', async (req, res) => {
+  const code = req.params.code;
+  const { code: bodyCode, name, operator, tspId } = req.body || {};
+
+  // if code is sent in the body, it must match the path param to avoid ambiguity
+  if (bodyCode && bodyCode !== code) {
+    return res.status(400).json({
+      error: `Path code '${code}' does not match body code '${bodyCode}'`
+    });
+  }
+
+  // Basic validation against your Pipeline schema
+  if (typeof name !== 'string' || typeof operator !== 'string' || typeof tspId !== 'string') {
+    return res.status(400).json({
+      error: 'Invalid body. Expected: { name: string, operator: string, tspId: string }'
+    });
+  }
+
+  try {
+    const result = await runQuery(
+      `
+      MERGE (p:Pipeline {code: $code})
+      SET
+        p.name     = $name,
+        p.operator = $operator,
+        p.tspId    = $tspId
+      RETURN
+        p.code     AS code,
+        p.name     AS name,
+        p.operator AS operator,
+        p.tspId    AS tspId
+      `,
+      { code, name, operator, tspId }, 'WRITE'
+    );
+
+    const record = result.records[0];
+    const pipeline = {};
+    for (const key of record.keys) {
+      pipeline[key] = toPlain(record.get(key));
+    }
+
+    res.json(pipeline);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -491,7 +730,7 @@ app.get('/pipeline-segments/:pipeline', async (req, res) => {
         id(r) AS segmentId, 
         src.name AS sourceName, src.number as sourceNumber,
         dst.name AS destName, dst.number as destNumber
-      ORDER BY src.number, dst.number SKIP toInteger($skip) LIMIT toInteger($limit)
+      ORDER BY src.position.y DESC SKIP toInteger($skip) LIMIT toInteger($limit)
       `,
       { pipeline, limit, skip }
     );
@@ -720,6 +959,52 @@ app.get('/notices/constrained-noms/:locationName/:beforeDate(\\d{4}-\\d{2}-\\d{2
   }
 });
 
+// GET /volumes/firm-transport/:pipeline — fetch firm transport for a pipeline and date
+// Example: /volumes/historical-flow/ANR?asOfDate=2025-11-01
+app.get('/volumes/firm-transport/:pipeline', async (req, res) => {
+  const pipeline = req.params.pipeline;
+  const asOfDate = req.query.asOfDate; // optional
+
+  try {
+    const result = await runQuery(
+      `
+      MATCH (tc:TransportationContract {pipeline: $pipeline})
+      MATCH (tc)-[:HAS_SEASON]->(cs:ContractSeason)
+        ${asOfDate ? 'WHERE cs.startDate <=  date($asOfDate) <= cs.endDate' : ''}
+        
+      MATCH (cs)-[:PRIMARY_RECEIPT]->(rec:Location)
+      MATCH (cs)-[:PRIMARY_DELIVERY]->(del:Location)
+      RETURN
+        tc.pipeline       AS pipeline,
+        tc.contractNumber AS contractNumber,
+        tc.rateSchedule   AS rateSchedule,
+        cs.seasonId       AS seasonId,
+        cs.startDate      AS startDate,
+        cs.endDate        AS endDate,
+        cs.mdq            AS mdq,
+        rec.name          AS primaryReceipt,
+        rec.number        AS primaryReceiptNumber,
+        del.name          AS primaryDelivery,
+        del.number        AS primaryDeliveryNumber
+      ORDER BY tc.rateSchedule, tc.contractNumber, cs.startDate;      `,
+      { pipeline, asOfDate }
+    );
+
+    // Map records to plain JS objects
+    const contracts = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    res.json({ params: { pipeline, asOfDate }, count: contracts.length, contracts });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /volumes/historical-flow/:pipeline/:startDate/:endDate?limit=100&skip=0  — fetch meter volumes for a pipeline and date range w/ pagination
 // Example: /volumes/historical-flow/ANR?limit=50&skip=0
 app.get('/volumes/historical-flow/:pipeline/:startDate(\\d{4}-\\d{2}-\\d{2})/:endDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
@@ -766,6 +1051,44 @@ app.get('/volumes/historical-flow/:pipeline/:startDate(\\d{4}-\\d{2}-\\d{2})/:en
   }
 });
 
+// GET /prices/:pipeline/:startDate/:endDate?limit=100&skip=0  — fetch prices for a pipeline and date range w/ pagination
+// Example: /prices/ANR?limit=50&skip=0
+app.get('/prices/:pipeline/:startDate(\\d{4}-\\d{2}-\\d{2})/:endDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
+  const pipeline = req.params.pipeline;
+  const startDate = req.params.startDate;
+  const endDate = req.params.endDate;
+  const limit = parseInt(req.query.limit) || 100;
+  const skip  = parseInt(req.query.skip)  || 0;
+
+  try {
+    const result = await runQuery(
+      `
+      MATCH (r:Region)-[hs:HAS_SYMBOL]->(s:Symbol)-[htd:HAS_TRADING_DAY]->(td:SymbolTradingDay)
+      WHERE r.pipeline = $pipeline AND td.date >= datetime($startDate) AND td.date <= datetime($endDate)
+      RETURN
+        r as region,
+        s as symbol,
+        td AS symbolTradingDay
+      ORDER BY r.name, s.code, td.date, td.modificationDate DESC SKIP toInteger($skip) LIMIT toInteger($limit)
+      `,
+      { pipeline, startDate, endDate, limit, skip }
+    );
+
+    // Map records to plain JS objects
+    const prices = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    res.json({ params: { pipeline, startDate, endDate }, count: prices.length, prices, page: { skip: Number(skip), limit: Number(limit) } });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /path?from=...&to=...&maxHops= (default unlimited)
 // Optionally, pass at=ISO8601 to flag nodes that have an active :Constraint at that instant.
 app.get('/path', async (req, res) => {
@@ -800,34 +1123,94 @@ app.get('/path', async (req, res) => {
   }
 });
 
-// GET /constraints?location=Name&at=ISO&limit=50&skip=0
-// If location omitted, returns constraints across graph; if at provided, filters active at time.
-app.get('/constraints', async (req, res) => {
-  const { location, at, limit = 50, skip = 0 } = req.query;
-  const atTime = at ? new Date(at).toISOString() : null;
+// GET /notices:pipeline?noticeType=Type&asOf=DateTime&limit=50&skip=0
+// Get notices for a pipeline; if asOf provided, filters on effectiveDate and endDate.
+app.get('/notices/:pipeline', async (req, res) => {
+  const pipeline = req.params.pipeline;
+  const { noticeType, asOf, limit = 100, skip = 0 } = req.query;
+  const atTime = asOf ? new Date(asOf).toISOString() : null;
+
+  const baseMatch = `MATCH (n:Notice) WHERE n.pipeline = $pipeline`;
+
+  const typeFilter = noticeType ? 
+    `AND n.noticeType = $noticeType` : '';
+
+  const timeFilter = atTime ?
+    `  AND n.effectiveDate <= datetime($asOf) AND (n.endDate IS NULL OR n.endDate >= datetime($asOf))` : '';
+
+  const cypher = `
+    ${baseMatch}
+    ${typeFilter}
+    ${timeFilter}
+    WITH n ORDER BY n.endDate DESC, n.effectiveDate DESC SKIP toInteger($skip) LIMIT toInteger($limit)
+    RETURN
+      n.noticeId,
+      n.noticeType,
+      n.category,
+      n.status,
+      n.subject,
+      n.postingDate,
+      n.effectiveDate,
+      n.endDate,
+      n.pipeline,
+      n.updatedAt,
+      n.content AS content
+  `;
+
+  try {
+    const result = await runQuery(cypher, { pipeline, noticeType, asOf: atTime, limit: Number(limit), skip: Number(skip) });
+    //const notices =
+    //  result.records.length > 0
+    //    ? toPlain(result.records[0].get('notices'))
+    //    : [];
+
+    // Map records to plain JS objects
+    const notices = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    res.json({ pipeline, noticeType, asOf, count: notices.length, notices, page: { skip: Number(skip), limit: Number(limit) } });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /notices/constraints:pipeline?location=Name&asOf=ISO&limit=50&skip=0
+// If location omitted, returns constraints across graph; if asOf provided, filters active asOf time.
+app.get('/notices/constraints/:pipeline', async (req, res) => {
+  const pipeline = req.params.pipeline;
+  const { location, asOf, limit = 100, skip = 0 } = req.query;
+  const atTime = asOf ? new Date(asOf).toISOString() : null;
 
   const baseMatch = location ?
     `MATCH (l:Location {name: $location})-[:HAS_CONSTRAINT]->(c:Constraint)` :
     `MATCH (c:Constraint)`;
 
+  const where = 'WHERE c.pipeline = $pipeline';
+
   const timeFilter = atTime ?
-    `WHERE c.start <= datetime($at) AND (c.end IS NULL OR c.end >= datetime($at))` : '';
+    `  AND c.start <= datetime($asOf) AND (c.end IS NULL OR c.end >= datetime($asOf))` : '';
 
   const cypher = `
     ${baseMatch}
+    ${where}
     ${timeFilter}
     WITH c ORDER BY c.start DESC SKIP toInteger($skip) LIMIT toInteger($limit)
     RETURN collect(c {.*, id: id(c)}) AS constraints
   `;
 
   try {
-    const result = await runQuery(cypher, { location, at: atTime, limit: Number(limit), skip: Number(skip) });
+    const result = await runQuery(cypher, { pipeline, location, asOf: atTime, limit: Number(limit), skip: Number(skip) });
     const constraints =
       result.records.length > 0
         ? toPlain(result.records[0].get('constraints'))
         : [];
 
-    res.json({ location, at, count: constraints.length, constraints, page: { skip: Number(skip), limit: Number(limit) } });
+    res.json({ pipeline, location, asOf, count: constraints.length, constraints, page: { skip: Number(skip), limit: Number(limit) } });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

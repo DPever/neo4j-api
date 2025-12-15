@@ -1,0 +1,12 @@
+# Node
+node_modules/
+npm-debug.log
+.env
+.env.local
+
+# OS
+.DS_Store
+
+# Build artifacts
+dist/
+coverage/
