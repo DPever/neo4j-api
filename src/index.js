@@ -45,10 +45,48 @@ const swaggerOptions = {
         Pipeline: {
           type: 'object',
           properties: {
-            code: { type: 'string' },
-            name: { type: 'string' },
-            operator: { type: 'string' },
-            tspId: { type: 'string' }
+            code: { type: 'string', description: 'Common abbreviation for pipeline' },
+            name: { type: 'string', description: 'Pipeline name' },
+            operator: { type: 'string', description: 'Company who operates the Pipeline' },
+            tspId: { type: 'string', description: 'Transportation Service Provider ID for EDI communications' },
+            modelType: { type: 'string', nullable: true, description: 'NAESB Model type (e.g., PNT, PTH, etc.)'}
+          }
+        },
+        Zone: {
+          type: 'object',
+          properties: {
+            pipelineCode: { type: 'string', description: 'Pipeline code this zone belongs to' },
+            name: { type: 'string', description: 'Zone name' },
+            sortOrder: { type: 'integer', description: 'Sort order for visual display' }
+          }
+        },
+        LocationType: {
+          type: 'object',
+          properties: {
+            code: { type: 'string', description: 'Common abbreviation for location type' },
+            description: { type: 'string', description: 'Location type description' }
+          }
+        },
+        TransportationContract: {
+          type: 'object',
+          properties: {
+            tbd: { type: 'string', description: 'To be defined' }
+          }
+        },
+        Notice: {
+          type: 'object',
+          properties: {
+            pipelineCode: { type: 'string' },
+            noticeId: { type: 'integer' },
+            postingDatetime: { type: 'string', format: 'date-time' },
+            noticeType: { type: 'string' },
+            category: { type: 'string' },
+            status: { type: 'string' },
+            priorNoticeId: { type: 'integer', nullable: true },
+            subject: { type: 'string' },
+            effectiveDatetime: { type: 'string', format: 'date-time' },
+            endDatetime: { type: 'string', format: 'date-time', nullable: true },
+            content: { type: 'string' }
           }
         },
         Constraint: {
@@ -178,7 +216,8 @@ swaggerSpec.paths = {
               code: 'ANR',
               name: 'ANR Pipeline',
               operator: 'TC Energy',
-              tspId: '006958581'
+              tspId: '006958581',
+              modelType: 'PNT'
             }
           }
         }
@@ -194,6 +233,65 @@ swaggerSpec.paths = {
         },
         400: { description: 'Invalid request body' },
         500: { description: 'Server error' }
+      }
+    }
+  },
+
+  '/zones/{pipeline}': {
+    get: {
+      summary: 'Zones for a pipeline',
+      tags: ['Reference Data'],
+      parameters: [
+        { name: 'pipeline', in: 'path', required: true, schema: { type: 'string' }, 
+          description: 'Filter by pipeline name (e.g., ANR, TETCO)'
+        }
+      ],
+      responses: {
+        200: {
+          description: 'Found',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  count: { type: 'integer' },
+                  zones : {
+                    type:'array',
+                    items:{ $ref:'#/components/schemas/Zone'}
+                  }
+                }
+              }
+            }
+          }
+        },
+        404:{ description:'Not found'}
+      }
+    }
+  },
+
+  '/location-types': {
+    get: {
+      summary: 'List of location types',
+      tags: ['Reference Data'],
+      responses: {
+        200: {
+          description: 'Found',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  count: { type: 'integer' },
+                  locationTypes : {
+                    type:'array',
+                    items:{ $ref:'#/components/schemas/LocationType'}
+                  }
+                }
+              }
+            }
+          }
+        },
+        404:{ description:'Not found'}
       }
     }
   },
@@ -235,10 +333,9 @@ swaggerSpec.paths = {
               }
             }
           }
-        },
-        404: { description: 'Not found' }
+        }
       }
-    }
+    },
   },
 
   '/pipeline-segments/{pipeline}': {
@@ -320,10 +417,13 @@ swaggerSpec.paths = {
       tags: ['Volume'],
       parameters: [
         { name: 'pipeline', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'shipperName', in: 'query', required: false, schema: { type: 'string' }, example: 'Antero Resources Corporation' },
         { name: 'asOfDate', in: 'query', required: false, 
           schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
           example: '2025-11-01'
-        }
+        },
+        { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 1000 } },
+        { name: 'skip', in: 'query', required: false, schema: { type: 'integer', default: 0 } }
       ],
       responses: {
         200: {
@@ -334,6 +434,42 @@ swaggerSpec.paths = {
               params: { type: 'object' },
               count: { type: 'integer' },
               contracts: { type: 'array', items: { type: 'object' } }
+            }
+          } } }
+        }
+      }
+    }
+  },
+
+  '/volumes/operationally-available-capacity/{pipeline}': {
+    get: {
+      summary: 'Operationally Available Capacity for a pipeline and as of date',
+      tags: ['Volume'],
+      parameters: [
+        { name: 'pipeline', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'asOfDate', in: 'query', required: false, 
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2025-11-01'
+        },
+        { name: 'cycle', in: 'query', required: false, schema: { type: 'string' }, description: 'Filter by cycle (e.g., TIM, EVN, ID1, ID2, ID3)' },
+        { name: 'locationNumber', in: 'query', required: false, schema: { type: 'string' } },
+        { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 1000 }, 
+          description: 'maximum number of segments to return', example: '1000'
+        },
+        { name: 'skip', in: 'query', required: false, schema: { type: 'integer', default: 0 }, 
+          description: 'number of segments to skip for pagination', example: '0'
+        }
+      ],
+      responses: {
+        200: {
+          description: 'Operationally Available Capacity',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              params: { type: 'object' },
+              count: { type: 'integer' },
+              operationallyAvailableCapacity: { type: 'array', items: { type: 'object' } },
+              page: { type: 'object' }
             }
           } } }
         }
@@ -476,9 +612,10 @@ swaggerSpec.paths = {
           content: { 'application/json': { schema: {
             type: 'object',
             properties: {
-              beforeDate: { type: 'string', format: 'date' },
+              pipeline: { type: 'string' },
+              asOf: { type: 'string', format: 'date-time' },
               count: { type: 'integer' },
-              notices: { type: 'array', items: { $ref: '#/components/schemas/Nomination' } }
+              notices: { type: 'array', items: { $ref: '#/components/schemas/Notice' } }
             }
           } } }
         }
@@ -596,8 +733,9 @@ app.get('/pipelines', async (req, res) => {
         n.code        as code,
         n.name        as name,
         n.operator    as operator,
-        n.tspId       as tspId
-      ORDER BY n.name
+        n.tspId       as tspId,
+        n.modelType   as modelType
+      ORDER BY n.code
       `
     );
 
@@ -619,7 +757,7 @@ app.get('/pipelines', async (req, res) => {
 // PUT /pipelines/:code  — upsert a single pipeline
 app.put('/pipelines/:code', async (req, res) => {
   const code = req.params.code;
-  const { code: bodyCode, name, operator, tspId } = req.body || {};
+  const { code: bodyCode, name, operator, tspId, modelType } = req.body || {};
 
   // if code is sent in the body, it must match the path param to avoid ambiguity
   if (bodyCode && bodyCode !== code) {
@@ -629,9 +767,11 @@ app.put('/pipelines/:code', async (req, res) => {
   }
 
   // Basic validation against your Pipeline schema
-  if (typeof name !== 'string' || typeof operator !== 'string' || typeof tspId !== 'string') {
+  if (typeof name !== 'string' || typeof operator !== 'string' || typeof tspId !== 'string'
+      || (modelType !== null && typeof modelType !== 'string')) 
+  {
     return res.status(400).json({
-      error: 'Invalid body. Expected: { name: string, operator: string, tspId: string }'
+      error: 'Invalid body. Expected: { name: string, operator: string, tspId: string, modelType?: string | null }'
     });
   }
 
@@ -643,11 +783,13 @@ app.put('/pipelines/:code', async (req, res) => {
         p.name     = $name,
         p.operator = $operator,
         p.tspId    = $tspId
+        ${modelType ? ' , p.modelType = $modelType ' : ''}
       RETURN
         p.code     AS code,
         p.name     AS name,
         p.operator AS operator,
-        p.tspId    AS tspId
+        p.tspId    AS tspId,
+        p.modelType AS modelType
       `,
       { code, name, operator, tspId }, 'WRITE'
     );
@@ -659,6 +801,103 @@ app.put('/pipelines/:code', async (req, res) => {
     }
 
     res.json(pipeline);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /zones/:pipeline  — fetch all zones for a given pipeline
+// Example: /zones/ANR
+app.get('/zones/:pipeline', async (req, res) => {
+  const pipeline = req.params.pipeline;
+
+  // Basic input validation
+  if (!pipeline || typeof pipeline !== 'string') {
+    return res.status(400).json({ error: "pipeline is required" });
+  }
+  try {
+    const result = await runQuery(
+      `
+      MATCH (z:Zone)
+      WHERE z.pipelineCode = $pipeline
+      RETURN
+        z.pipelineCode AS pipelineCode,
+        z.name         AS name,
+        z.sortOrder    AS sortOrder
+      ORDER BY z.sortOrder
+      `,
+      { pipeline }
+    );
+
+    // Map records to plain JS objects
+    const zones = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    res.json({ count: zones.length, pipeline,  zones });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /location-types  — fetch all location types
+app.get('/location-types', async (req, res) => {
+  try {
+    const result = await runQuery(
+      `
+      MATCH (n:LocationType) 
+      RETURN
+        n.code        as code,
+        n.description as description
+      ORDER BY n.code
+      `
+    );
+
+    // Map records to plain JS objects
+    const locationTypes = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    res.json({ count: locationTypes.length, locationTypes });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /pipelines  — fetch all pipelines
+app.get('/pipelines', async (req, res) => {
+  try {
+    const result = await runQuery(
+      `
+      MATCH (n:Pipeline) 
+      RETURN
+        n.code        as code,
+        n.name        as name,
+        n.operator    as operator,
+        n.tspId       as tspId,
+        n.modelType   as modelType
+      ORDER BY n.code
+      `
+    );
+
+    // Map records to plain JS objects
+    const pipelines = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    res.json({ count: pipelines.length, pipelines });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -963,31 +1202,42 @@ app.get('/notices/constrained-noms/:locationName/:beforeDate(\\d{4}-\\d{2}-\\d{2
 // Example: /volumes/historical-flow/ANR?asOfDate=2025-11-01
 app.get('/volumes/firm-transport/:pipeline', async (req, res) => {
   const pipeline = req.params.pipeline;
+  const shipperName = req.query.shipperName; // optional
   const asOfDate = req.query.asOfDate; // optional
+  const limit = parseInt(req.query.limit) || 1000;
+  const skip = parseInt(req.query.skip) || 0;
 
   try {
     const result = await runQuery(
       `
-      MATCH (tc:TransportationContract {pipeline: $pipeline})
-      MATCH (tc)-[:HAS_SEASON]->(cs:ContractSeason)
-        ${asOfDate ? 'WHERE cs.startDate <=  date($asOfDate) <= cs.endDate' : ''}
+      MATCH (tc:TransportationContract {pipelineCode: $pipeline})
+      MATCH (tc)-[:HAS_PERIOD]->(cp:ContractPeriod)
+      WHERE tc.rateSchedule STARTS WITH 'FT'  // only firm transport
+        ${asOfDate ? 'AND tc.effectiveDate <= date($asOfDate) <= tc.endDate AND cp.effectiveFrom <=  date($asOfDate) <= cp.effectiveTo' : ''}
+        ${shipperName ? 'AND tc.shipperName = $shipperName' : ''}
         
-      MATCH (cs)-[:PRIMARY_RECEIPT]->(rec:Location)
-      MATCH (cs)-[:PRIMARY_DELIVERY]->(del:Location)
+      MATCH (cp)-[:PRIMARY_RECEIPT]->(rec:Location)
+      MATCH (cp)-[:PRIMARY_DELIVERY]->(del:Location)
       RETURN
-        tc.pipeline       AS pipeline,
-        tc.contractNumber AS contractNumber,
-        tc.rateSchedule   AS rateSchedule,
-        cs.seasonId       AS seasonId,
-        cs.startDate      AS startDate,
-        cs.endDate        AS endDate,
-        cs.mdq            AS mdq,
-        rec.name          AS primaryReceipt,
-        rec.number        AS primaryReceiptNumber,
-        del.name          AS primaryDelivery,
-        del.number        AS primaryDeliveryNumber
-      ORDER BY tc.rateSchedule, tc.contractNumber, cs.startDate;      `,
-      { pipeline, asOfDate }
+        tc.pipelineCode       AS pipelineCode,
+        tc.shipperName        AS shipperName,
+        tc.rateSchedule       AS rateSchedule,
+        tc.contractId         AS contractId,
+        tc.effectiveDate      AS contractEffectiveDate,
+        tc.endDate            AS contractEndDate,
+        tc.baseMDQ            AS baseMDQ,
+        tc.flowUnit           AS flowUnit,
+        cp.periodCode         AS periodCode,
+        cp.effectiveFrom      AS periodEffectiveFrom,
+        cp.effectiveTo        AS periodEffectiveTo,
+        cp.mdq                AS mdq,
+        rec.name              AS primaryReceipt,
+        rec.number            AS primaryReceiptNumber,
+        del.name              AS primaryDelivery,
+        del.number            AS primaryDeliveryNumber
+      ORDER BY tc.shipperName, tc.rateSchedule, tc.contractId SKIP toInteger($skip) LIMIT toInteger($limit);
+      `,
+      { pipeline, shipperName, asOfDate, limit, skip }
     );
 
     // Map records to plain JS objects
@@ -1000,6 +1250,64 @@ app.get('/volumes/firm-transport/:pipeline', async (req, res) => {
     });
 
     res.json({ params: { pipeline, asOfDate }, count: contracts.length, contracts });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /volumes/operationally-available-capacity/:pipeline — fetch operationally available capacity for a pipeline and date
+// Example: /volumes/operationally-available-capacity/ANR?asOfDate=2025-11-01
+app.get('/volumes/operationally-available-capacity/:pipeline', async (req, res) => {
+  const pipeline = req.params.pipeline;
+  const asOfDate = req.query.asOfDate; // optional
+  const cycle = req.query.cycle; // optional
+  const locationNumber = req.query.locationNumber; // optional
+  const limit = parseInt(req.query.limit) || 1000;
+  const skip = parseInt(req.query.skip) || 0;
+
+  try {
+    const result = await runQuery(
+      `
+      MATCH (n:OperationallyAvailableCapacity) 
+      WHERE n.pipelineCode = $pipeline
+        ${asOfDate ? ' AND n.flowDate =  date($asOfDate)' : ''}
+        ${cycle ? ' AND n.cycle = $cycle' : ''}
+        ${locationNumber ? ' AND n.locationNumber = $locationNumber' : ''}
+ 
+        RETURN
+          n.pipelineCode                    AS pipelineCode,
+          n.cycle                           AS cycle,
+          n.designCapacity                  AS designCapacity,
+          n.direction                       AS direction,
+          n.flowDate                        AS flowDate,
+          n.flowInd                         AS flowIndicator,
+          n.grossOrNet                      AS grossOrNet,
+          n.ITIndicator                     AS ITIndicator,
+          n.locationName                    AS locationName,
+          n.locationNumber                  AS locationNumber,
+          n.locPurpDesc                     AS locPurpDesc,
+          n.locQTI                          AS locQTI,
+          n.nonFirmSchedQty                 AS nonFirmSchedQty,
+          n.operatingCapacity               AS operatingCapacity,
+          n.operationallyAvailableCapacity  AS operationallyAvailableCapacity,
+          n.postingDate                     AS postingDate,
+          n.totalSchedQty                   AS totalSchedQty
+      ORDER BY n.pipelineCode, n.locationNumber, n.flowDate, n.cycle, n.postingDate DESC SKIP toInteger($skip) LIMIT toInteger($limit);
+      `,
+      { pipeline, asOfDate, cycle, locationNumber, limit, skip }
+    );
+
+    // Map records to plain JS objects
+    const operationallyAvailableCapacity = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    res.json({ params: { pipeline, asOfDate }, count: operationallyAvailableCapacity.length, operationallyAvailableCapacity, 
+      page: { skip: Number(skip), limit: Number(limit) }});
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1130,31 +1438,31 @@ app.get('/notices/:pipeline', async (req, res) => {
   const { noticeType, asOf, limit = 100, skip = 0 } = req.query;
   const atTime = asOf ? new Date(asOf).toISOString() : null;
 
-  const baseMatch = `MATCH (n:Notice) WHERE n.pipeline = $pipeline`;
+  const baseMatch = `MATCH (n:Notice) WHERE n.pipelineCode = $pipeline`;
 
   const typeFilter = noticeType ? 
     `AND n.noticeType = $noticeType` : '';
 
   const timeFilter = atTime ?
-    `  AND n.effectiveDate <= datetime($asOf) AND (n.endDate IS NULL OR n.endDate >= datetime($asOf))` : '';
+    `  AND n.effectiveDatetime <= datetime($asOf) AND (n.endDatetime IS NULL OR n.endDatetime >= datetime($asOf))` : '';
 
   const cypher = `
     ${baseMatch}
     ${typeFilter}
     ${timeFilter}
-    WITH n ORDER BY n.endDate DESC, n.effectiveDate DESC SKIP toInteger($skip) LIMIT toInteger($limit)
+    WITH n ORDER BY n.endDatetime DESC, n.effectiveDatetime DESC SKIP toInteger($skip) LIMIT toInteger($limit)
     RETURN
-      n.noticeId,
-      n.noticeType,
-      n.category,
-      n.status,
-      n.subject,
-      n.postingDate,
-      n.effectiveDate,
-      n.endDate,
-      n.pipeline,
-      n.updatedAt,
-      n.content AS content
+      n.pipelineCode        AS pipelineCode,
+      n.noticeId            AS noticeId,
+      n.postingDatetime     AS postingDatetime,
+      n.noticeType          AS noticeType,
+      n.category            AS category,
+      n.status              AS status,
+      n.subject             AS subject,
+      n.priorNoticeId       AS priorNoticeId,
+      n.effectiveDatetime   AS effectiveDatetime,
+      n.endDatetime         AS endDatetime,
+      n.content             AS content
   `;
 
   try {
