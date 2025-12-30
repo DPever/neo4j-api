@@ -381,6 +381,64 @@ swaggerSpec.paths = {
     }
   },
 
+  '/v1/contracts/{pipeline}': {
+    get: {
+      summary: 'Antero firm transportation contracts for a pipeline and as of date',
+      tags: ['Reference Data'],
+      parameters: [
+        { name: 'pipeline', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'asOfDate', in: 'query', required: false, 
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2025-11-01'
+        },
+        { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 1000 } },
+        { name: 'skip', in: 'query', required: false, schema: { type: 'integer', default: 0 } }
+      ],
+      responses: {
+        200: {
+          description: 'Firm Transportation Contracts',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              params: { type: 'object' },
+              count: { type: 'integer' },
+              contracts: { type: 'array', items: { type: 'object' } }
+            }
+          } } }
+        }
+      }
+    }
+  },
+
+  '/v1/api/contracts-and-constraints/{pipeline}': {
+    get: {
+      summary: 'Antero firm transportation with capacity and constraints for a pipeline and as of date',
+      tags: ['API'],
+      parameters: [
+        { name: 'pipeline', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'asOfDate', in: 'query', required: false, 
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2025-11-01'
+        },
+        { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 1000 } },
+        { name: 'skip', in: 'query', required: false, schema: { type: 'integer', default: 0 } }
+      ],
+      responses: {
+        200: {
+          description: 'Firm Transportation Contracts with Capacity and Constraints',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              params: { type: 'object' },
+              count: { type: 'integer' },
+              contracts: { type: 'array', items: { type: 'object' } }
+            }
+          } } }
+        }
+      }
+    }
+  },
+
   '/noms/{pipeline}/{flowDate}': {
     get: {
       summary: 'All nominations on a pipeline for a gas day',
@@ -652,7 +710,7 @@ swaggerSpec.paths = {
             properties: {
               beforeDate: { type: 'string', format: 'date' },
               count: { type: 'integer' },
-              constraints: { type: 'array', items: { $ref: '#/components/schemas/Nomination' } }
+              constraints: { type: 'array', items: { $ref: '#/components/schemas/Constraint' } }
             }
           } } }
         },
@@ -989,6 +1047,147 @@ app.get('/pipeline-segments/:pipeline', async (req, res) => {
   }
 });
 
+// GET /v1/contracts/:pipeline — fetch Antero's firm transport for a pipeline and date
+// Example: /v1/contracts/ANR?asOfDate=2025-11-01
+app.get('/v1/contracts/:pipeline', async (req, res) => {
+  const pipeline = req.params.pipeline;
+  const asOfDate = req.query.asOfDate; // optional
+  const limit = parseInt(req.query.limit) || 1000;
+  const skip = parseInt(req.query.skip) || 0;
+
+  try {
+    const result = await runQuery(
+      `
+      MATCH (tc:TransportationContract {pipelineCode: $pipeline})
+      MATCH (tc)-[:HAS_SEASON]->(cs:ContractSeason)
+      WHERE tc.rateSchedule STARTS WITH 'FT'  // only firm transport
+        ${asOfDate ? 'AND tc.effectiveDate <= date($asOfDate) <= tc.endDate AND cs.effectiveDate <=  date($asOfDate) <= cs.endDate' : ''}
+        
+      MATCH (cs)-[:PRIMARY_RECEIPT]->(rec:Location)
+      MATCH (cs)-[:PRIMARY_DELIVERY]->(del:Location)
+      RETURN
+        tc.pipelineCode       AS pipelineCode,
+        tc.shipperName        AS shipperName,
+        tc.rateSchedule       AS rateSchedule,
+        tc.contractId         AS contractId,
+        tc.effectiveDate      AS contractEffectiveDate,
+        tc.endDate            AS contractEndDate,
+        tc.baseMDQ            AS baseMDQ,
+        tc.flowUnit           AS flowUnit,
+        cs.seasonId           AS seasonId,
+        cs.effectiveDate      AS seasonEffectiveFrom,
+        cs.endDate            AS seasonEffectiveTo,
+        cs.mdq                AS mdq,
+        rec.name              AS primaryReceipt,
+        rec.number            AS primaryReceiptNumber,
+        del.name              AS primaryDelivery,
+        del.number            AS primaryDeliveryNumber
+      ORDER BY tc.shipperName, tc.rateSchedule, tc.contractId SKIP toInteger($skip) LIMIT toInteger($limit);
+      `,
+      { pipeline, asOfDate, limit, skip }
+    );
+
+    // Map records to plain JS objects
+    const contracts = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    res.json({ params: { pipeline, asOfDate }, count: contracts.length, contracts });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /v1/api/contracts-and-constraints/:pipeline — fetch Antero's firm transport with capacity and constraints info
+// Example: /v1/api/contracts-and-constraints/ANR?asOfDate=2025-11-01
+app.get('/v1/api/contracts-and-constraints/:pipeline', async (req, res) => {
+  const pipeline = req.params.pipeline;
+  const asOfDate = req.query.asOfDate; // optional
+  const limit = parseInt(req.query.limit) || 1000;
+  const skip = parseInt(req.query.skip) || 0;
+
+  try {
+    const result = await runQuery(
+      `
+      MATCH (tc:TransportationContract {pipelineCode: $pipeline})
+      MATCH (tc)-[:HAS_SEASON]->(cs:ContractSeason)
+      WHERE tc.rateSchedule STARTS WITH 'FT'  // only firm transport
+        AND tc.effectiveDate <= date($asOfDate) <= tc.endDate AND cs.effectiveDate <=  date($asOfDate) <= cs.endDate
+        
+      MATCH (cs)-[:PRIMARY_RECEIPT]->(rec:Location)
+      MATCH (cs)-[:PRIMARY_DELIVERY]->(del:Location)
+
+      // Find shortest path between receipt and delivery
+      OPTIONAL MATCH path = shortestPath((rec)-[:Segment_Locations*..50]-(del))
+      
+      // collect locations along the path that have constraints effective on asOfDate
+      WITH tc, cs, rec, del,
+        CASE WHEN path IS NULL THEN [] ELSE nodes(path) END AS pathLocs
+
+      UNWIND pathLocs AS loc
+      OPTIONAL MATCH (loc)-[:HAS_CONSTRAINT]->(c:Constraint)
+      WHERE c.effectiveDatetime <= datetime($asOfDate) <= c.endDatetime
+      
+      WITH tc, cs, rec, del,
+        collect(DISTINCT CASE
+          WHEN c IS NULL THEN NULL
+          ELSE {
+            locationNumber: loc.number,
+            locationName:   loc.name,
+            kind:           c.kind,
+            limit:          c.limit,
+            percent:        c.percent,
+            flowUnit:       c.units,
+            effectiveDatetime:  c.effectiveDatetime,
+            endDatetime:    c.endDatetime
+          }
+        END) AS rawConstraints
+
+      WITH tc, cs, rec, del,
+        [x IN rawConstraints WHERE x IS NOT NULL] AS constraints
+
+      RETURN
+        tc.pipelineCode       AS pipelineCode,
+        tc.shipperName        AS shipperName,
+        tc.rateSchedule       AS rateSchedule,
+        tc.contractId         AS contractId,
+        tc.effectiveDate      AS contractEffectiveDate,
+        tc.endDate            AS contractEndDate,
+        tc.baseMDQ            AS baseMDQ,
+        tc.flowUnit           AS flowUnit,
+        cs.seasonId           AS seasonId,
+        cs.effectiveDate      AS seasonEffectiveFrom,
+        cs.endDate            AS seasonEffectiveTo,
+        cs.mdq                AS mdq,
+        rec.name              AS primaryReceipt,
+        rec.number            AS primaryReceiptNumber,
+        del.name              AS primaryDelivery,
+        del.number            AS primaryDeliveryNumber,
+        constraints          AS constraints
+      ORDER BY tc.shipperName, tc.rateSchedule, tc.contractId SKIP toInteger($skip) LIMIT toInteger($limit);
+      `,
+      { pipeline, asOfDate, limit, skip }
+    );
+
+    // Map records to plain JS objects
+    const contracts = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    res.json({ params: { pipeline, asOfDate }, count: contracts.length, contracts });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /noms/:pipeline/:flowDate  — fetch all nominations on a pipeline for a given flow date (YYYY-MM-DD)
 // Example: /noms/ANR/2025-11-01
 app.get('/noms/:pipeline/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
@@ -1011,7 +1210,7 @@ app.get('/noms/:pipeline/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
         MATCH p = allShortestPaths( (rcpt)-[:Segment_Locations*]->(dlv) )
         UNWIND nodes(p) AS loc
         OPTIONAL MATCH (loc)-[:HAS_CONSTRAINT]->(c:Constraint)
-          WHERE c.start <= dayEnd AND c.end >= dayStart
+          WHERE c.effectiveDatetime <= dayEnd AND c.endDatetime >= dayStart
         WITH collect(DISTINCT {loc: loc, c: c}) AS raw
         RETURN [x IN raw WHERE x.c IS NOT NULL] AS hits   // [] if none
       }
@@ -1029,8 +1228,8 @@ app.get('/noms/:pipeline/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
         [h IN hits | {
           locationName: h.loc.name,
           locationPipeline: h.loc.pipeline,
-          constraintStart: h.c.start,
-          constraintEnd: h.c.end,
+          constraintStart: h.c.effectiveDatetime,
+          constraintEnd: h.c.endDatetime,
           constraintPercent: h.c.percent
         }] AS impactedLocations
       ORDER BY n.pipeline, n.nomId
@@ -1074,7 +1273,7 @@ app.get('/notices/constrained-noms/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req,
         MATCH p = allShortestPaths( (rcpt)-[:Segment_Locations*]->(dlv) )
         UNWIND nodes(p) AS loc
         MATCH (loc)-[:HAS_CONSTRAINT]->(c:Constraint)
-        WHERE c.start <= dayEnd AND c.end >= dayStart   // time overlap
+        WHERE c.effectiveDatetime <= dayEnd AND c.endDatetime >= dayStart   // time overlap
         RETURN collect(DISTINCT {loc: loc, c: c}) AS hits
       }
 
@@ -1094,8 +1293,8 @@ app.get('/notices/constrained-noms/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req,
         [h IN hits | {
           locationName: h.loc.name,
           locationPipeline: h.loc.pipeline,
-          constraintStart: h.c.start,
-          constraintEnd: h.c.end,
+          constraintStart: h.c.effectiveDatetime,
+          constraintEnd: h.c.endDatetime,
           constraintPercent: h.c.percent
         }] AS impactedLocations
       ORDER BY nomId
@@ -1158,7 +1357,7 @@ app.get('/notices/constrained-noms/:locationName/:beforeDate(\\d{4}-\\d{2}-\\d{2
           datetime({date: n.flowDate}) AS dayStart,
           datetime({date: n.flowDate}) + duration('P1D') - duration('PT1S') AS dayEnd
       MATCH (target)-[:HAS_CONSTRAINT]->(c:Constraint)
-      WHERE c.start <= dayEnd AND c.end >= dayStart
+      WHERE c.effectiveDatetime <= dayEnd AND c.endDatetime >= dayStart
 
       RETURN
         n.flowDate        AS flowDate,
@@ -1173,8 +1372,8 @@ app.get('/notices/constrained-noms/:locationName/:beforeDate(\\d{4}-\\d{2}-\\d{2
         target.name       AS constrainedLocation,
         c.kind            AS constraintKind,
         c.percent         AS percentConstrained,
-        c.start           AS constraintStart,
-        c.end             AS constraintEnd
+        c.effectiveDatetime AS constraintStart,
+        c.endDatetime       AS constraintEnd
       ORDER BY flowDate DESC, pipeline ASC, TA ASC, cycle DESC
       `,
       { locationName, beforeDate, pipeline }
@@ -1287,7 +1486,7 @@ app.get('/volumes/operationally-available-capacity/:pipeline', async (req, res) 
           n.locationNumber                  AS locationNumber,
           n.locPurpDesc                     AS locPurpDesc,
           n.locQTI                          AS locQTI,
-          n.nonFirmSchedQty                 AS nonFirmSchedQty,
+          n.schedStatus                     AS schedStatus,
           n.operatingCapacity               AS operatingCapacity,
           n.operationallyAvailableCapacity  AS operationallyAvailableCapacity,
           n.postingDate                     AS postingDate,
@@ -1306,7 +1505,7 @@ app.get('/volumes/operationally-available-capacity/:pipeline', async (req, res) 
       return obj;
     });
 
-    res.json({ params: { pipeline, asOfDate }, count: operationallyAvailableCapacity.length, operationallyAvailableCapacity, 
+    res.json({ params: { pipeline, asOfDate, cycle, locationNumber }, count: operationallyAvailableCapacity.length, operationallyAvailableCapacity, 
       page: { skip: Number(skip), limit: Number(limit) }});
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1410,7 +1609,7 @@ app.get('/path', async (req, res) => {
    WITH p
    UNWIND nodes(p) AS loc
    OPTIONAL MATCH (loc)-[:HAS_CONSTRAINT]->(c:Constraint)
-   WHERE c.start <= datetime($at) AND (c.end IS NULL OR c.end >= datetime($at))
+   WHERE c.effectiveDatetime <= datetime($at) AND (c.endDatetime IS NULL OR c.endDatetime >= datetime($at))
    WITH p, collect(DISTINCT loc {.*, id: id(loc), constrained: count(c) > 0}) AS locs,
         [rel IN relationships(p) | rel {.*, id: id(rel), type: type(rel)}] AS rels
    RETURN locs AS nodes, rels AS relationships
@@ -1498,16 +1697,16 @@ app.get('/notices/constraints/:pipeline', async (req, res) => {
     `MATCH (l:Location {name: $location})-[:HAS_CONSTRAINT]->(c:Constraint)` :
     `MATCH (c:Constraint)`;
 
-  const where = 'WHERE c.pipeline = $pipeline';
+  const where = 'WHERE c.pipelineCode = $pipeline';
 
   const timeFilter = atTime ?
-    `  AND c.start <= datetime($asOf) AND (c.end IS NULL OR c.end >= datetime($asOf))` : '';
+    `  AND c.effectiveDatetime <= datetime($asOf) AND (c.endDatetime IS NULL OR c.endDatetime >= datetime($asOf))` : '';
 
   const cypher = `
     ${baseMatch}
     ${where}
     ${timeFilter}
-    WITH c ORDER BY c.start DESC SKIP toInteger($skip) LIMIT toInteger($limit)
+    WITH c ORDER BY c.effectiveDatetime DESC SKIP toInteger($skip) LIMIT toInteger($limit)
     RETURN collect(c {.*, id: id(c)}) AS constraints
   `;
 
