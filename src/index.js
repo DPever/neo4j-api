@@ -1182,7 +1182,38 @@ app.get('/v1/api/contracts-and-constraints/:pipeline', async (req, res) => {
       return obj;
     });
 
-    res.json({ params: { pipeline, asOfDate }, count: contracts.length, contracts });
+    // Enrich contracts with scheduled quantity
+    const scheduledPairs = await mapWithConcurrency(
+      contracts,
+      5, // <= tune (5–10 is usually plenty)
+      async (c) => {
+        const qty = await getScheduledQty(c.contractId, asOfDate);
+        return [c.contractId, qty ?? 0];
+      }
+    );
+
+    const scheduledByContractId = Object.fromEntries(scheduledPairs);
+
+
+    // Enrich contracts with calculated maximum available capacity
+    const capacityPairs = await mapWithConcurrency(
+      contracts,
+      5,
+      async (c) => {
+        const capacity = await calculateMaxCapacity(c, asOfDate);
+        return [c.contractId, capacity ?? 0];
+      }
+    );
+
+    const capacityByContractId = Object.fromEntries(capacityPairs);
+
+    const enrichedContracts = contracts.map(c => ({
+      ...c,
+      scheduledQty: scheduledByContractId[c.contractId] ?? 0,
+      calculatedMaxCapacity: capacityByContractId[c.contractId] ?? 0
+    }));
+    
+    res.json({ params: { pipeline, asOfDate }, count: enrichedContracts.length, enrichedContracts });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1794,6 +1825,54 @@ app.post('/cypher/read', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// Example helper function to get scheduled quantity for a contract as of a date
+// In real implementation, this would query the database or another data source like Endur.
+async function getScheduledQty(contractId, asOfDate) {
+  if (contractId == "123966") {
+    return 200000;
+  }
+  else if (contractId == "125082") {
+    return 82000;
+  }
+  return 300000;
+}
+
+// Example helper function to get maximum capacity for a contract as of a date
+// In real implementation, this would query the database and do some calculations that are still tbd.
+// It's also likely that max capacity would depend on more than just contractId and asOfDate,
+// so the entire contractObj is passed as a parameter. That way, additional properties can be used as needed.
+async function calculateMaxCapacity(contractObj, asOfDate) {
+  if (contractObj.constraints && contractObj.constraints.length === 0) {
+    return contractObj.mdq; // if no constraints, max capacity = mdq
+  }
+  else if (contractObj.contractId == "123966") {
+    return 160000;
+  }
+  return 235000;
+}
+
+// Helper function to map over items with a concurrency limit to avoid overwhelming the database
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let i = 0;
+
+  async function worker() {
+    while (true) {
+      const idx = i++;
+      if (idx >= items.length) return;
+      results[idx] = await mapper(items[idx], idx);
+    }
+  }
+
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    () => worker()
+  );
+
+  await Promise.all(workers);
+  return results;
+}
 
 // ---- Start server ----
 app.listen(PORT, () => {
