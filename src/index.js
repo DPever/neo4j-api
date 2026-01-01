@@ -772,6 +772,10 @@ const writesEnabled = parseBool(ENABLE_WRITES);
 
 // ---- Routes ----
 
+app.get('/warm', async (req, res) => {
+    res.json({ status: 'ok' }); // simple endpoint to keep the demo server warm
+});
+
 app.get('/health', async (req, res) => {
   try {
     await driver.getServerInfo(); // lightweight handshake
