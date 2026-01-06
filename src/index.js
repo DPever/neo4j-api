@@ -416,7 +416,7 @@ swaggerSpec.paths = {
       tags: ['API'],
       parameters: [
         { name: 'pipeline', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
-        { name: 'asOfDate', in: 'query', required: false, 
+        { name: 'asOfDate', in: 'query', required: true, 
           schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
           example: '2025-11-01'
         },
@@ -1110,9 +1110,14 @@ app.get('/v1/contracts/:pipeline', async (req, res) => {
 // Example: /v1/api/contracts-and-constraints/ANR?asOfDate=2025-11-01
 app.get('/v1/api/contracts-and-constraints/:pipeline', async (req, res) => {
   const pipeline = req.params.pipeline;
-  const asOfDate = req.query.asOfDate; // optional
+  const asOfDate = req.query.asOfDate;
   const limit = parseInt(req.query.limit) || 1000;
   const skip = parseInt(req.query.skip) || 0;
+
+  // Basic input validation
+  if (!asOfDate || !/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) {
+    return res.status(400).json({ error: "asOfDate is required and must be in YYYY-MM-DD format" });
+  }
 
   try {
     const result = await runQuery(
@@ -1216,8 +1221,44 @@ app.get('/v1/api/contracts-and-constraints/:pipeline', async (req, res) => {
       scheduledQty: scheduledByContractId[c.contractId] ?? 0,
       calculatedMaxCapacity: capacityByContractId[c.contractId] ?? 0
     }));
-    
-    res.json({ params: { pipeline, asOfDate }, count: enrichedContracts.length, enrichedContracts });
+
+    const contractsWithLocationCapacity = await mapWithConcurrency(
+      enrichedContracts,
+      5, // keep modest — this doubles calls
+      async (c) => {
+        const [
+          receiptResult,
+          deliveryResult
+        ] = await Promise.all([
+          getCapacityAndUtilizationAtLocation(
+            pipeline,
+            c.primaryReceiptNumber,
+            'RPQ',
+            asOfDate, 1
+          ),
+          getCapacityAndUtilizationAtLocation(
+            pipeline,
+            c.primaryDeliveryNumber,
+            'DPQ',
+            asOfDate, 1
+          ),
+          getCapacityAndUtilizationAtLocation(
+            pipeline,
+            c.primaryDeliveryNumber,
+            'DPQ',
+            asOfDate, 1
+          )
+        ]);
+
+        return {
+          ...c,
+          primaryReceiptCapacity: receiptResult.capacity[0] ?? null,
+          primaryDeliveryCapacity: deliveryResult.capacity[0] ?? null
+        };
+      }
+    );
+
+    res.json({ params: { pipeline, asOfDate }, count: enrichedContracts.length, contractsWithLocationCapacity });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1238,11 +1279,11 @@ app.get('/noms/:pipeline/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
         datetime({date: d}) + duration('P1D') - duration('PT1S') AS dayEnd
 
       MATCH (rcpt:Location)-[n:NOMINATED]->(dlv:Location)
-      WHERE n.pipeline = $pipeline AND n.flowDate = d
+      WHERE n.pipelineCode = $pipeline AND n.flowDate = d
 
       CALL {
         WITH rcpt, dlv, dayStart, dayEnd
-        MATCH p = allShortestPaths( (rcpt)-[:Segment_Locations*]->(dlv) )
+        MATCH p = allShortestPaths( (rcpt)-[:Segment_Locations*]-(dlv) )
         UNWIND nodes(p) AS loc
         OPTIONAL MATCH (loc)-[:HAS_CONSTRAINT]->(c:Constraint)
           WHERE c.effectiveDatetime <= dayEnd AND c.endDatetime >= dayStart
@@ -1252,13 +1293,14 @@ app.get('/noms/:pipeline/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
 
       RETURN
         n.nomId          AS nomId,
-        n.pipeline       AS pipeline,
+        n.pipelineCode   AS pipelineCode,
+        n.contractId     AS contractId,
         n.flowDate       AS flowDate,
         n.cycle          AS cycle,
-        rcpt.name        AS receiptLocation,
+        rcpt        AS receiptLocation,
         n.receiptVolume  AS receiptVolume,
         n.fuelLoss       AS fuelLoss,
-        dlv.name         AS deliveryLocation,
+        dlv         AS deliveryLocation,
         n.deliveryVolume AS deliveryVolume,
         [h IN hits | {
           locationName: h.loc.name,
@@ -1267,7 +1309,7 @@ app.get('/noms/:pipeline/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req, res) => {
           constraintEnd: h.c.endDatetime,
           constraintPercent: h.c.percent
         }] AS impactedLocations
-      ORDER BY n.pipeline, n.nomId
+      ORDER BY n.pipelineCode, n.nomId
       `,
       { pipeline, flowDate }
     );
@@ -1855,6 +1897,93 @@ async function calculateMaxCapacity(contractObj, asOfDate) {
   }
   return 235000;
 }
+
+// GET /volumes/capacity-and-utilization/:pipeline/:locationNumber/:locQTI/:asOfDate
+// Example: /volumes/capacity-and-utilization/ANR/312115/DPQ/2025-11-01
+app.get(
+  '/volumes/capacity-and-utilization/:pipeline/:locationNumber/:locQTI/:asOfDate(\\d{4}-\\d{2}-\\d{2})',
+  async (req, res) => {
+    const { pipeline, locationNumber, locQTI, asOfDate } = req.params;
+
+    try {
+      const data = await getCapacityAndUtilizationAtLocation(
+        pipeline,
+        locationNumber,
+        locQTI,
+        asOfDate
+      );
+
+      res.json(data);
+    } catch (e) {
+      console.error('capacity-and-utilization error:', e);
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+// Helper function to get capacity and utilization at a location
+async function getCapacityAndUtilizationAtLocation(
+  pipelineCode,
+  locationNumber,
+  locQTI,
+  asOfDate,
+  limit = 100 // default limit far exceeds the number of expected results
+) {
+  const locationNumberStr =
+    typeof locationNumber === 'string'
+      ? locationNumber
+      : locationNumber.toString();
+
+  const result = await runQuery(
+    `
+    MATCH (n:OperationallyAvailableCapacity) 
+    WHERE n.pipelineCode = $pipelineCode
+      AND n.locationNumber = $locationNumberStr
+      AND n.locQTI = $locQTI
+      AND n.flowDate = date($asOfDate)
+    RETURN
+      n.pipelineCode                    AS pipelineCode,
+      n.locationNumber                  AS locationNumber,
+      n.locationName                    AS locationName,
+      n.flowDate                        AS flowDate,
+      n.cycle                           AS cycle,
+      n.designCapacity                  AS designCapacity,
+      n.operatingCapacity               AS operatingCapacity,
+      n.totalSchedQty                   AS totalSchedQty,
+      n.operationallyAvailableCapacity  AS operationallyAvailableCapacity,
+      100.0 * n.operationallyAvailableCapacity / n.operatingCapacity
+                                       AS availablePercent,
+      100.0 * n.totalSchedQty / n.operatingCapacity
+                                       AS utilizationPercent,
+      n.schedStatus                     AS schedStatus,
+      n.locQTI                          AS locQTI,
+      n.locPurpDesc                     AS locPurpDesc,
+      n.ITIndicator                     AS ITIndicator,
+      n.grossOrNet                      AS grossOrNet,
+      n.flowInd                         AS flowIndicator,
+      n.direction                       AS direction,
+      n.postingDate                     AS postingDatetime
+    ORDER BY n.postingDate DESC
+    LIMIT toInteger($limit);
+    `,
+    { pipelineCode, locationNumberStr, locQTI, asOfDate, limit }
+  );
+
+  const capacity = result.records.map(r => {
+    const obj = {};
+    for (const key of r.keys) {
+      obj[key] = toPlain(r.get(key));
+    }
+    return obj;
+  });
+
+  return {
+    params: { pipelineCode, locationNumber: locationNumberStr, locQTI, asOfDate },
+    count: capacity.length,
+    capacity
+  };
+}
+
 
 // Helper function to map over items with a concurrency limit to avoid overwhelming the database
 async function mapWithConcurrency(items, limit, mapper) {
