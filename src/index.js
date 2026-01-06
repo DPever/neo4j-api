@@ -439,6 +439,34 @@ swaggerSpec.paths = {
     }
   },
 
+  '/v1/api/path-details/{pipeline}/{fromLocationNumber}/{toLocationNumber}/{asOfDate}': {
+    get: {
+      summary: 'Get path details for a pipeline and as of date',
+      tags: ['API'],
+      parameters: [
+        { name: 'pipeline', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'fromLocationNumber', in: 'path', required: true, schema: { type: 'string' }, example: '513105' },
+        { name: 'toLocationNumber', in: 'path', required: true, schema: { type: 'string' }, example: '42078' },
+        { name: 'asOfDate', in: 'path', required: true,
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2025-11-01'
+        }
+      ],
+      responses: {
+        200: {
+          description: 'Path Details',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              params: { type: 'object' },
+              pathDetails: { type: 'object' }
+            }
+          } } }
+        }
+      }
+    }
+  },
+
   '/noms/{pipeline}/{flowDate}': {
     get: {
       summary: 'All nominations on a pipeline for a gas day',
@@ -1241,12 +1269,6 @@ app.get('/v1/api/contracts-and-constraints/:pipeline', async (req, res) => {
             c.primaryDeliveryNumber,
             'DPQ',
             asOfDate, 1
-          ),
-          getCapacityAndUtilizationAtLocation(
-            pipeline,
-            c.primaryDeliveryNumber,
-            'DPQ',
-            asOfDate, 1
           )
         ]);
 
@@ -1263,6 +1285,117 @@ app.get('/v1/api/contracts-and-constraints/:pipeline', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// GET /v1/api/path-details/:pipeline/:fromLocationNumber/:toLocationNumber/:asOfDate
+// Example: /v1/api/path-details/ANR/513105/42078/2025-11-01
+app.get(
+  '/v1/api/path-details/:pipeline/:fromLocationNumber/:toLocationNumber/:asOfDate(\\d{4}-\\d{2}-\\d{2})',
+  async (req, res) => {
+    const { pipeline, fromLocationNumber, toLocationNumber, asOfDate } = req.params;
+
+    // Basic input validation
+    if (!pipeline) return res.status(400).json({ error: 'pipeline is required' });
+
+    const fromNum = Number(fromLocationNumber);
+    const toNum = Number(toLocationNumber);
+    if (!Number.isFinite(fromNum) || !Number.isFinite(toNum)) {
+      return res.status(400).json({ error: 'fromLocationNumber and toLocationNumber must be numeric' });
+    }
+
+    try {
+      const result = await runQuery(
+        `
+        WITH
+          datetime($asOfDate) AS dayStart,
+          datetime($asOfDate) + duration({days: 1}) AS dayEnd
+
+        MATCH (a:Location {pipeline: $pipeline, number: $fromNum})
+        MATCH (b:Location {pipeline: $pipeline, number: $toNum})
+        MATCH p = shortestPath((a)-[:Segment_Locations*..200]-(b))
+        WHERE ALL(r IN relationships(p) WHERE r.version = 20260102)
+
+        UNWIND range(0, size(relationships(p)) - 1) AS i
+        WITH
+          i,
+          nodes(p)[i]     AS fromLoc,
+          nodes(p)[i + 1] AS toLoc,
+          relationships(p)[i] AS seg,
+          dayStart, dayEnd
+
+        OPTIONAL MATCH (fromLoc)-[:HAS_CONSTRAINT]->(cf:Constraint)
+        WHERE cf.effectiveDatetime < dayEnd AND cf.endDatetime >= dayStart
+        WITH
+          i, fromLoc, toLoc, seg, dayStart, dayEnd,
+          count(cf) > 0 AS fromHasConstraint
+
+        OPTIONAL MATCH (toLoc)-[:HAS_CONSTRAINT]->(ct:Constraint)
+        WHERE ct.effectiveDatetime < dayEnd AND ct.endDatetime >= dayStart
+        WITH
+          i, fromLoc, toLoc, seg, fromHasConstraint,
+          count(ct) > 0 AS toHasConstraint
+
+        RETURN
+          i + 1              AS seq,
+          fromLoc.number     AS fromLocationNumber,
+          fromLoc.name       AS fromLocationName,
+          toLoc.number       AS toLocationNumber,
+          toLoc.name         AS toLocationName,
+          seg.version        AS segmentVersion,
+          fromHasConstraint  AS fromHasConstraint,
+          toHasConstraint    AS toHasConstraint
+        ORDER BY seq
+        `,
+        { pipeline, fromNum, toNum, asOfDate }
+      );
+
+      const rawSegments = result.records.map(r => {
+        const obj = {};
+        for (const key of r.keys) obj[key] = toPlain(r.get(key));
+        return obj;
+      });
+
+      // finalize segments by enriching with capacity info
+      const segments = await mapWithConcurrency(
+        rawSegments,
+        5, // keep modest — this doubles database calls
+        async (c) => {
+          const [
+            fromResult,
+            toResult
+          ] = await Promise.all([
+            getCapacityAndUtilizationAtLocation(
+              pipeline,
+              c.fromLocationNumber,
+              'RPQ',
+              asOfDate, 1
+            ),
+            getCapacityAndUtilizationAtLocation(
+              pipeline,
+              c.toLocationNumber,
+              'DPQ',
+              asOfDate, 1
+          )
+        ]);
+
+        return {
+          ...c,
+          fromCapacity: fromResult.capacity[0] ?? null,
+          toCapacity: toResult.capacity[0] ?? null
+        };
+      }
+    );
+
+    return res.json({
+        params: { pipeline, fromLocationNumber: fromNum, toLocationNumber: toNum, asOfDate },
+        count: segments.length,
+        segments
+      });
+    } catch (e) {
+      console.error('path-details error:', e);
+      return res.status(500).json({ error: e.message });
+    }
+  }
+);
 
 // GET /noms/:pipeline/:flowDate  — fetch all nominations on a pipeline for a given flow date (YYYY-MM-DD)
 // Example: /noms/ANR/2025-11-01
@@ -1951,10 +2084,14 @@ async function getCapacityAndUtilizationAtLocation(
       n.operatingCapacity               AS operatingCapacity,
       n.totalSchedQty                   AS totalSchedQty,
       n.operationallyAvailableCapacity  AS operationallyAvailableCapacity,
-      100.0 * n.operationallyAvailableCapacity / n.operatingCapacity
-                                       AS availablePercent,
-      100.0 * n.totalSchedQty / n.operatingCapacity
-                                       AS utilizationPercent,
+      CASE
+        WHEN n.operatingCapacity IS NULL OR n.operatingCapacity = 0 THEN NULL
+        ELSE 100.0 * n.operationallyAvailableCapacity / n.operatingCapacity
+      END                               AS availablePercent,
+      CASE
+        WHEN n.operatingCapacity IS NULL OR n.operatingCapacity = 0 THEN NULL
+        ELSE 100.0 * n.totalSchedQty / n.operatingCapacity
+      END                               AS utilizationPercent,
       n.schedStatus                     AS schedStatus,
       n.locQTI                          AS locQTI,
       n.locPurpDesc                     AS locPurpDesc,
