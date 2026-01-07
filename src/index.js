@@ -1335,14 +1335,28 @@ app.get(
           count(ct) > 0 AS toHasConstraint
 
         RETURN
-          i + 1              AS seq,
-          fromLoc.number     AS fromLocationNumber,
-          fromLoc.name       AS fromLocationName,
-          toLoc.number       AS toLocationNumber,
-          toLoc.name         AS toLocationName,
-          seg.version        AS segmentVersion,
-          fromHasConstraint  AS fromHasConstraint,
-          toHasConstraint    AS toHasConstraint
+          i + 1 AS seq,
+          {
+            number: fromLoc.number,
+            name:   fromLoc.name,
+            zone:   fromLoc.zone,
+            type:   fromLoc.type,
+            area:   fromLoc.area,
+            direction: fromLoc.direction,
+            position: fromLoc.position,
+            hasConstraint: fromHasConstraint
+          } AS fromLocation,
+          {
+            number: toLoc.number,
+            name:   toLoc.name,
+            zone:   toLoc.zone,
+            type:   toLoc.type,
+            area:   toLoc.area,
+            direction: toLoc.direction,
+            position: toLoc.position,
+            hasConstraint: toHasConstraint
+          } AS toLocation,
+          seg.version       AS segmentVersion
         ORDER BY seq
         `,
         { pipeline, fromNum, toNum, asOfDate }
@@ -1354,33 +1368,36 @@ app.get(
         return obj;
       });
 
-      // finalize segments by enriching with capacity info
-      const segments = await mapWithConcurrency(
-        rawSegments,
-        5, // keep modest — this doubles database calls
-        async (c) => {
-          const [
-            fromResult,
-            toResult
-          ] = await Promise.all([
-            getCapacityAndUtilizationAtLocation(
-              pipeline,
-              c.fromLocationNumber,
-              'RPQ',
-              asOfDate, 1
-            ),
-            getCapacityAndUtilizationAtLocation(
-              pipeline,
-              c.toLocationNumber,
-              'DPQ',
-              asOfDate, 1
-          )
+    // finalize segments by enriching with capacity info
+    const segments = await mapWithConcurrency(
+      rawSegments,
+      5, // keep modest — this doubles database calls
+      async (s) => {
+        const fromNum = s?.fromLocation?.number;
+        const toNum   = s?.toLocation?.number;
+
+        const [fromResult, toResult] = await Promise.all([
+          fromNum
+            ? getCapacityAndUtilizationAtLocation(pipeline, fromNum, 'RPQ', asOfDate, 1)
+            : Promise.resolve({ capacity: [] }),
+          toNum
+            ? getCapacityAndUtilizationAtLocation(pipeline, toNum, 'DPQ', asOfDate, 1)
+            : Promise.resolve({ capacity: [] })
         ]);
 
+        const fromCapacity = fromResult.capacity?.[0] ?? null;
+        const toCapacity   = toResult.capacity?.[0] ?? null;
+
         return {
-          ...c,
-          fromCapacity: fromResult.capacity[0] ?? null,
-          toCapacity: toResult.capacity[0] ?? null
+          ...s,
+          fromLocation: {
+            ...s.fromLocation,
+            capacity: fromCapacity
+          },
+          toLocation: {
+            ...s.toLocation,
+            capacity: toCapacity
+          }
         };
       }
     );
