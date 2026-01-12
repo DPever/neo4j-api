@@ -715,18 +715,20 @@ swaggerSpec.paths = {
 
   '/api/v1/pipelines/{pipelineCode}/notices': {
     get: {
-      summary: 'Notices on a pipeline, optionally filtered by noticeType and time',
+      summary: 'Notices on a pipeline within a given date range',
       tags: ['Notices'],
       parameters: [
         { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
-        { name: 'noticeType', in: 'query', required: false, schema: { type: 'string' }, description: 'noticeType (e.g., Capacity Constraint, Maintenance Operational Flow)' },
-        { name: 'asOf',  in: 'query', required: false,
-          schema: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}(?:T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})?)?$' },
-          examples: {
-            date: { value: '2025-11-01' },
-            dateTime: { value: '2025-11-01T15:30:00Z' }
-          }
+        { name: 'startDate',  in: 'query', required: true,
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2025-11-01'
         },
+        { name: 'endDate',  in: 'query', required: true,
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2025-11-30'
+        },
+        { name: 'category', in: 'query', required: false, schema: { type: 'string' }, description: 'category (e.g., Critical, Non-Critical)' },
+        { name: 'noticeType', in: 'query', required: false, schema: { type: 'string' }, description: 'noticeType (e.g., Capacity Constraint, Curtailment, Force Majeure)' },
         { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 100 }, 
           description: 'maximum number of flow rows to return', example: '100'
         },
@@ -744,6 +746,29 @@ swaggerSpec.paths = {
               asOf: { type: 'string', format: 'date-time' },
               count: { type: 'integer' },
               notices: { type: 'array', items: { $ref: '#/components/schemas/Notice' } }
+            }
+          } } }
+        }
+      }
+    }
+  },
+
+  '/api/v1/pipelines/{pipelineCode}/notices/{noticeId}': {
+    get: {
+      summary: 'Notice on a pipeline with all Locations impacted',
+      tags: ['Notices'],
+      parameters: [
+        { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'noticeId', in: 'path', required: true, schema: { type: 'string' }, example: '12345' }
+      ],
+      responses: {
+        200: {
+          description: 'Notice Details',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              pipelineCode: { type: 'string' },
+              notice: { type: 'object' }
             }
           } } }
         }
@@ -1882,21 +1907,29 @@ app.get('/path', async (req, res) => {
 // Get notices for a pipeline; if asOf provided, filters on effectiveDate and endDate.
 app.get('/api/v1/pipelines/:pipelineCode/notices', async (req, res) => {
   const pipelineCode = req.params.pipelineCode;
-  const { noticeType, asOf, limit = 100, skip = 0 } = req.query;
-  const atTime = asOf ? new Date(asOf).toISOString() : null;
+  const { category, noticeType, startDate, endDate, limit = 100, skip = 0 } = req.query;
+  
+  // startDate and endDate are required
+  if (!startDate || !endDate) {
+    return res.status(400).json({ error: 'startDate and endDate are required query params' });
+  }
+
 
   const baseMatch = `MATCH (n:Notice) WHERE n.pipelineCode = $pipelineCode`;
 
-  const typeFilter = noticeType ? 
-    `AND n.noticeType = $noticeType` : '';
+  const timeFilter = `
+    AND n.effectiveDatetime <= datetime($endDate)
+    AND (n.endDatetime IS NULL OR n.endDatetime >= datetime($startDate))
+  `;
 
-  const timeFilter = atTime ?
-    `  AND n.effectiveDatetime <= datetime($asOf) AND (n.endDatetime IS NULL OR n.endDatetime >= datetime($asOf))` : '';
+  const categoryFilter = category ? `AND n.category = $category` : '';
+  const typeFilter = noticeType ? `AND n.noticeType = $noticeType` : '';
 
   const cypher = `
     ${baseMatch}
-    ${typeFilter}
     ${timeFilter}
+    ${categoryFilter}
+    ${typeFilter}
     WITH n ORDER BY n.endDatetime DESC, n.effectiveDatetime DESC SKIP toInteger($skip) LIMIT toInteger($limit)
     RETURN
       n.pipelineCode        AS pipelineCode,
@@ -1913,7 +1946,7 @@ app.get('/api/v1/pipelines/:pipelineCode/notices', async (req, res) => {
   `;
 
   try {
-    const result = await runQuery(cypher, { pipelineCode, noticeType, asOf: atTime, limit: Number(limit), skip: Number(skip) });
+    const result = await runQuery(cypher, { pipelineCode, startDate, endDate, category, noticeType, limit: Number(limit), skip: Number(skip) });
     //const notices =
     //  result.records.length > 0
     //    ? toPlain(result.records[0].get('notices'))
@@ -1928,7 +1961,74 @@ app.get('/api/v1/pipelines/:pipelineCode/notices', async (req, res) => {
       return obj;
     });
 
-    res.json({ pipelineCode, noticeType, asOf, count: notices.length, notices, page: { skip: Number(skip), limit: Number(limit) } });
+    res.json({ pipelineCode, startDate, endDate, category, noticeType, count: notices.length, notices, page: { skip: Number(skip), limit: Number(limit) } });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/v1/pipelines/:pipelineCode/notices/:noticeId
+// Get a single notice for a pipeline
+app.get('/api/v1/pipelines/:pipelineCode/notices/:noticeId', async (req, res) => {
+  const pipelineCode = req.params.pipelineCode;
+  const noticeId = req.params.noticeId;
+
+  const cypher = `
+    MATCH (n:Notice {pipelineCode: $pipelineCode, noticeId: $noticeId})
+
+    CALL (n) {
+      OPTIONAL MATCH (n)-[:CREATES_CONSTRAINT]->(c:Constraint)
+      OPTIONAL MATCH (l:Location)-[:HAS_CONSTRAINT]->(c)
+      WITH
+        c,
+        collect(DISTINCT CASE WHEN l IS NULL THEN NULL ELSE l {
+          .pipelineCode,
+          .locationId,
+          .name,
+          .type,
+          .direction,
+          .zone,
+          .marketArea,
+          .state,
+          .county,
+          .pipelineSegmentCode,
+          .position
+        } END) AS locs
+      WITH
+        c,
+        [x IN locs WHERE x IS NOT NULL] AS locations
+      RETURN collect(
+        CASE WHEN c IS NULL THEN NULL ELSE {
+          pipelineCode:      c.pipelineCode,
+          effectiveDatetime: c.effectiveDatetime,
+          endDatetime:       c.endDatetime,
+          limit:             c.limit,
+          flowUnit:          c.flowUnit,
+          source:            c.source,
+          createdAt:         c.createdAt,
+          kind:              c.kind,
+          locations:         locations
+        } END
+      ) AS constraints
+    }
+
+    RETURN n { .* , constraints: [x IN constraints WHERE x IS NOT NULL] } AS notice;
+  `;
+
+  try {
+    const result = await runQuery(cypher, { pipelineCode, noticeId });
+    if (result.records.length === 0) {
+      return res.status(404).json({
+        error: 'Notice not found',
+        pipelineCode,
+        noticeId
+      });
+    }
+
+    // There is exactly one row and one column: "notice"
+    const notice = toPlain(result.records[0].get('notice'));
+
+    res.json({ pipelineCode, noticeId, notice });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
