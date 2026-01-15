@@ -3,6 +3,13 @@ import express from 'express';
 import neo4j from 'neo4j-driver';
 import swaggerUi from 'swagger-ui-express';
 import swaggerJsdoc from 'swagger-jsdoc';
+import {
+  validateDirection,
+  validatePosition,
+  validateZone
+} from './validators/locationValidator.js';
+import { ValidationError } from './validators/common.js';
+
 
 // ---- Config ----
 const {
@@ -52,6 +59,18 @@ const swaggerOptions = {
             modelType: { type: 'string', nullable: true, description: 'NAESB Model type (e.g., PNT, PTH, etc.)'}
           }
         },
+        Cycle: {
+          type: 'object',
+          properties: {
+            pipelineCode: { type: 'string', description: 'Pipeline code for this cycle' },
+            cycleCode: { type: 'string', description: 'Cycle code (e.g., TIM, EVE, ID1, ID2, ID3)' },
+            name: { type: 'string', description: 'Cycle name' },
+            nomDeadlineLocalTime: { type: 'object', description: 'Nomination deadline in local time'},
+            confirmByLocalTime: { type: 'object', description: 'Confirmation deadline in local time' },
+            gasDayOffset: { type: 'integer', description: 'Gas day offset (1=next gas day; 0=same gas day)' },
+            sortOrder: { type: 'integer', description: 'Sort order for visual display' }
+          }
+        },
         Zone: {
           type: 'object',
           properties: {
@@ -67,10 +86,39 @@ const swaggerOptions = {
             description: { type: 'string', description: 'Location type description' }
           }
         },
-        TransportationContract: {
+        Position: {
           type: 'object',
           properties: {
-            tbd: { type: 'string', description: 'To be defined' }
+            latitude: { type: 'number', description: 'Latitude of the position' },
+            longitude: { type: 'number', description: 'Longitude of the position' }
+          }
+        },
+        Location: {
+          type: 'object',
+          properties: {
+            locationId: { type: 'string', description: 'Unique identifier for the location on the pipeline' },
+            name: { type: 'string', description: 'Location name' },
+            direction: { type: 'string', description: 'Direction of flow at this location' },
+            zone: { type: 'string', description: 'Zone this location belongs to' },
+            marketArea: { type: 'string', description: 'Market area this location belongs to' },
+            type: { type: 'string', description: 'Type of location (e.g., receipt, delivery)' },
+            effectiveDate: { type: 'string', format: 'date', description: 'Effective date for this location' },
+            endDate: { type: 'string', format: 'date', nullable: true, description: 'End date for this location' },
+            state: { type: 'string', description: 'State where the location is located', nullable: true },
+            county: { type: 'string', description: 'County where the location is located', nullable: true },
+            country: { type:'string', description:'Country where the location is located', nullable:true }, 
+            pipelineSegmentCode:{type:'string',description:'Pipeline segment code for the location', nullable:true },
+            primaryDataSource:{type:'string',description:'Primary data source for the location'},
+            primaryDataAsOf:{type:'string',format:'date-time',description:'Date and time when primary data was as of'},
+            position:{type: 'object', $ref: '#/components/schemas/Position', description:'Position of the location', nullable:true },
+            positionDataSource:{type:'string',description:'Data source for position information', nullable:true },
+            positionDataAsOf:{type:'string',format:'date-time',description:'Date and time when position data was as of', nullable:true }
+          }
+        },
+        TransportationContract : {
+          type : "object",
+          properties : {
+            tbd : { type : "string", description : "To be defined" }
           }
         },
         Notice: {
@@ -126,6 +174,28 @@ const swaggerOptions = {
                 }
               }
             }
+          }
+        },
+        OperationallyAvailableCapacity: {
+          type: 'object',
+          properties: {
+            pipelineCode: { type: 'string' },
+            locationId: { type: 'string' },
+            flowDate: { type: 'string', format: 'date' },
+            postingDatetime: { type: 'string', format: 'date-time' },
+            cycle: { type: 'string' },
+            locationName: { type: 'string' },
+            locPurpDesc: { type: 'string' },
+            locQTI: { type: 'string' },
+            direction: { type: 'string' },
+            flowIndicator: { type: 'string' },
+            grossOrNet: { type: 'string' },
+            schedStatus: { type: 'string' },
+            designCapacity: { type: 'number' },
+            operatingCapacity: { type: 'number' },
+            operationallyAvailableCapacity: { type: 'number' },
+            totalSchedQty: { type: 'number' },
+            itIndicator: { type: 'string' }
           }
         },
         OperationalFlow: {
@@ -237,6 +307,38 @@ swaggerSpec.paths = {
     }
   },
 
+  '/api/v1/pipelines/{pipelineCode}/cycles': {
+    get: {
+      summary: 'Cycles for a pipeline',
+      tags: ['Reference Data'],
+      parameters: [
+        { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, 
+          description: 'Filter by pipeline name (e.g., ANR, TETCO)'
+        }
+      ],
+      responses: {
+        200: {
+          description: 'Found',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  count: { type: 'integer' },
+                  cycles : {
+                    type:'array',
+                    items:{ $ref:'#/components/schemas/Cycle'}
+                  }
+                }
+              }
+            }
+          }
+        },
+        404:{ description:'Not found'}
+      }
+    }
+  },
+
   '/api/v1/pipelines/{pipelineCode}/zones': {
     get: {
       summary: 'Zones for a pipeline',
@@ -340,6 +442,40 @@ swaggerSpec.paths = {
         }
       }
     },
+    post: {
+      summary: 'Ingest Locations for a pipeline',
+      tags: ['Reference Data'],
+      parameters: [
+        { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' }
+      ],
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: {
+                locations: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/Location' }
+                }
+              }
+            }
+          }
+        }
+      },
+      responses: {
+        200: {
+          description: 'Locations ingested',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              locations: { type: 'array', items: { $ref: '#/components/schemas/Location' } }
+            }
+          } } }
+        }
+      }
+    }
   },
 
   '/api/v1/pipelines/{pipelineCode}/connections': {
@@ -558,8 +694,42 @@ swaggerSpec.paths = {
             properties: {
               params: { type: 'object' },
               count: { type: 'integer' },
-              operationallyAvailableCapacity: { type: 'array', items: { type: 'object' } },
+              operationallyAvailableCapacity: { type: 'array', items: { $ref: '#/components/schemas/OperationallyAvailableCapacity' } },
               page: { type: 'object' }
+            }
+          } } }
+        }
+      }
+    },
+    put: {
+      summary: 'Ingest Operationally Available Capacity for a pipeline',
+      tags: ['Volume'],
+      parameters: [
+        { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' }
+      ],
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: {
+                records: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/OperationallyAvailableCapacity' }
+                }
+              }
+            }
+          }
+        }
+      },
+      responses: {
+        200: {
+          description: 'Operationally Available Capacity ingested',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              operationallyAvailableCapacity: { type: 'array', items: { $ref: '#/components/schemas/OperationallyAvailableCapacity' } }
             }
           } } }
         }
@@ -963,6 +1133,48 @@ app.put('/api/v1/pipelines/:pipelineCode', async (req, res) => {
   }
 });
 
+// GET /api/v1/pipelines/:pipelineCode/cycles  — fetch all cycles for a given pipeline
+// Example: /api/v1/pipelines/ANR/cycles
+app.get('/api/v1/pipelines/:pipelineCode/cycles', async (req, res) => {
+  const pipeline = req.params.pipelineCode;
+  
+  // Basic input validation
+  if (!pipeline || typeof pipeline !== 'string') {
+    return res.status(400).json({ error: "pipelineCode is required" });
+  }
+  try {
+    const result = await runQuery(
+      `
+      MATCH (c:Cycle)
+      WHERE c.pipelineCode = $pipeline
+      RETURN
+        c.pipelineCode          AS pipelineCode,
+        c.cycleCode             AS cycleCode,
+        c.name                  AS name,
+        c.nomDeadlineLocalTime  AS nomDeadlineLocalTime,
+        c.confirmByLocalTime    AS confirmByLocalTime,
+        c.gasDayOffset          AS gasDayOffset,
+        c.sortOrder             AS sortOrder
+      ORDER BY c.sortOrder
+      `,
+      { pipeline }
+    );
+
+    // Map records to plain JS objects
+    const cycles = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    res.json({ count: cycles.length, pipeline,  cycles });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/v1/pipelines/:pipelineCode/zones  — fetch all zones for a given pipeline
 // Example: /api/v1/pipelines/ANR/zones
 app.get('/api/v1/pipelines/:pipelineCode/zones', async (req, res) => {
@@ -1085,6 +1297,142 @@ app.get('/api/v1/pipelines/:pipelineCode/locations', async (req, res) => {
     res.json({ count: locations.length, pipeline, locations, page: { skip: Number(skip), limit: Number(limit) } });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/v1/pipelines/:pipelineCode/locations  — create a new Location on a pipeline
+// Body: { locationId, name, direction, zone, marketArea, type, effectiveDate, endDate?, state?, county?, country?, pipelineSegmentCode?, primaryDataSource, primaryDataAsOf, position?, positionDataSource?, positionDataAsOf? }
+app.post('/api/v1/pipelines/:pipelineCode/locations', async (req, res) => {
+  const pipelineCode = req.params.pipelineCode;
+  const body = req.body ?? {};
+  
+  // Accept either: { ...location } OR { locations: [ ... ] }
+  const locations = Array.isArray(body.locations) ? body.locations : [body];
+
+  if (locations.length === 0) {
+    return res.status(400).json({ error: 'No locations provided' });
+  }
+
+  // Required fields
+  const required = [
+    'locationId',
+    'name',
+    'direction',
+    'zone',
+    'marketArea',
+    'type',
+    'effectiveDate',
+    'primaryDataSource',
+    'primaryDataAsOf'
+  ];
+
+const optStr = (v) => {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  return s === '' ? null : s;
+};
+
+const normalize = (n) => {
+  for (const k of required) {
+    if (n[k] === undefined || n[k] === null || String(n[k]).trim() === '') {
+      throw new Error(`Missing required field: ${k}`);
+    }
+  }
+
+  return {
+    locationId: String(n.locationId).trim(),
+    name: String(n.name).trim(),
+    direction: String(n.direction).trim(),
+    zone: String(n.zone).trim(),
+    marketArea: String(n.marketArea).trim(),
+    type: String(n.type).trim(),
+
+    // Expect ISO date strings like "2026-01-11"
+    effectiveDate: String(n.effectiveDate).trim(),
+    endDate: optStr(n.endDate),
+
+    state: optStr(n.state),
+    county: optStr(n.county),
+    country: optStr(n.country),
+    pipelineSegmentCode: optStr(n.pipelineSegmentCode),
+
+    primaryDataSource: String(n.primaryDataSource).trim(),
+
+    // Expect ISO datetime like "2026-01-09T11:20:00Z" (or without Z if you prefer local)
+    primaryDataAsOf: String(n.primaryDataAsOf).trim(),
+
+    // If you want position as a Neo4j point, pass { latitude, longitude } as an object (see note below)
+    position: n.position ?? null,
+
+    positionDataSource: optStr(n.positionDataSource),
+    positionDataAsOf: optStr(n.positionDataAsOf)
+  };
+};
+
+  let normalized;
+  try {
+    normalized = locations.map(normalize);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+
+  // validate fields against enums and existing zones
+  const validZones = await fetchZoneNamesForPipeline(runQuery, pipelineCode);
+  try {
+    for (const loc of normalized) {
+      validateDirection(loc.direction);
+      validatePosition(loc.position);
+      validateZone(loc.zone, validZones, pipelineCode);
+    }
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+
+  const cypher = `
+    UNWIND $locations AS location
+    CREATE (n:Location)
+    SET
+      n.pipelineCode = $pipelineCode,
+      n.locationId = location.locationId,
+      n.name = location.name,
+      n.direction = location.direction,
+      n.zone = location.zone,
+      n.marketArea = location.marketArea,
+      n.type = location.type,
+      n.effectiveDate = date(location.effectiveDate),
+      n.endDate = CASE
+        WHEN location.endDate IS NULL THEN NULL
+        ELSE date(location.endDate)
+      END,
+      n.state = location.state,
+      n.county = location.county,
+      n.country = location.country,
+      n.pipelineSegmentCode = location.pipelineSegmentCode,
+      n.primaryDataSource = location.primaryDataSource,
+      n.primaryDataAsOf = datetime(location.primaryDataAsOf),
+      n.position = CASE
+        WHEN location.position IS NULL THEN NULL
+        ELSE point(location.position)
+      END,
+      n.positionDataSource = location.positionDataSource,
+      n.positionDataAsOf = CASE
+        WHEN location.positionDataAsOf IS NULL THEN NULL
+        ELSE datetime(location.positionDataAsOf)
+      END,
+      n.createdAt = datetime(),
+      n.updatedAt = datetime()
+    RETURN n
+  `;
+
+  try {
+    const result = await runQuery(cypher, { pipelineCode, locations: normalized }, 'WRITE');
+    const created = result.records.map(r => toPlain(r.get('n').properties));
+    return res.status(201).json({ pipelineCode, count: created.length, locations: created });
+  } catch (e) {
+    if (String(e.code || '').includes('ConstraintValidationFailed')) {
+      return res.status(409).json({ error: 'One or more locations already exist (constraint violation)' });
+    }
+    return res.status(500).json({ error: e.message });
   }
 });
 
@@ -1762,7 +2110,7 @@ app.get('/api/v1/pipelines/:pipelineCode/capacities/operationally-available', as
           n.schedStatus                     AS schedStatus,
           n.operatingCapacity               AS operatingCapacity,
           n.operationallyAvailableCapacity  AS operationallyAvailableCapacity,
-          n.postingDate                     AS postingDate,
+          n.postingDate                     AS postingDatetime,
           n.totalSchedQty                   AS totalSchedQty
       ORDER BY n.pipelineCode, n.locationId, n.flowDate, n.cycle, n.postingDate DESC SKIP toInteger($skip) LIMIT toInteger($limit);
       `,
@@ -1783,6 +2131,193 @@ app.get('/api/v1/pipelines/:pipelineCode/capacities/operationally-available', as
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// todo: clean up these temporary validation helpers and move into a capacityValidator.js file
+const mustStr = (v, field, rowIdx) => {
+  // empty strings are ok for *optional* fields
+  if (v === undefined || v === null) {
+    throw new Error(`Row ${rowIdx}: Missing required field: ${field}`);
+  }
+  return String(v).trim();
+};
+
+const mustNum = (v, field, rowIdx) => {
+  if (v === undefined || v === null || String(v).trim() === '') {
+    throw new Error(`Row ${rowIdx}: Missing required field: ${field}`);
+  }
+  const n = Number(v);
+  if (!Number.isFinite(n)) throw new Error(`Row ${rowIdx}: ${field} must be a number`);
+  return n;
+};
+
+// PUT /api/v1/pipelines/:pipelineCode/capacities/operationally-available — upsert operationally available capacity records
+// Body: { records: [ { pipelineCode, cycle, designCapacity, direction, flowDate, flowInd, grossOrNet, ITIndicator, locationName, locationId, locPurpDesc, locQTI, schedStatus, operatingCapacity, operationallyAvailableCapacity, postingDate, totalSchedQty }, ... ] }
+app.put('/api/v1/pipelines/:pipelineCode/capacities/operationally-available', async (req, res) => {
+  const pipelineCode = req.params.pipelineCode;
+  const body = req.body ?? {};
+
+  // Accept: { records:[...] } OR { ...singleRecord }
+  const incomingRows = Array.isArray(body.records) ? body.records : [body];
+
+  if (incomingRows.length === 0) {
+    return res.status(400).json({ error: 'No records provided' });
+  }
+  if (incomingRows.length > 200) {
+    return res.status(400).json({ error: 'Too many records provided; submit batches with fewer than 200 records' });
+  }
+
+  // Query params to control response payload size
+  // todo: add these params to the swagger API docs
+  const onlyFailures = parseBool(req.query.onlyFailures, false);     // return only ignored rows
+  const includeResults = parseBool(req.query.includeResults, true);  // allow counts-only response
+
+  // Normalize + validate
+  const rows = incomingRows.map((r, idx) => {
+    const row = {
+      pipelineCode, // enforce from route
+
+      cycle: mustStr(r.cycle, 'cycle', idx).toUpperCase(),
+      flowDate: mustStr(r.flowDate, 'flowDate', idx),                 // "YYYY-MM-DD"
+      postingDate: mustStr(r.postingDatetime, 'postingDatetime', idx),         // ISO datetime
+
+      locationId: mustStr(r.locationId, 'locationId', idx),
+      locationName: mustStr(r.locationName, 'locationName', idx),
+
+      locPurpDesc: mustStr(r.locPurpDesc, 'locPurpDesc', idx),
+      locQTI: mustStr(r.locQTI, 'locQTI', idx).toUpperCase(),
+      direction: mustStr(r.direction, 'direction', idx).toUpperCase(),
+      flowIndicator: mustStr(r.flowIndicator, 'flowIndicator', idx).toUpperCase(),
+      grossOrNet: mustStr(r.grossOrNet, 'grossOrNet', idx).toUpperCase(),
+      schedStatus: mustStr(r.schedStatus, 'schedStatus', idx).toUpperCase(),
+
+      designCapacity: mustNum(r.designCapacity, 'designCapacity', idx),
+      operatingCapacity: mustNum(r.operatingCapacity, 'operatingCapacity', idx),
+      operationallyAvailableCapacity: mustNum(r.operationallyAvailableCapacity, 'operationallyAvailableCapacity', idx),
+      totalSchedQty: mustNum(r.totalSchedQty, 'totalSchedQty', idx),
+
+      itIndicator: mustStr(r.itIndicator, 'itIndicator', idx).toUpperCase()
+    };
+
+    // Optional: direction enum check
+    if (!['R', 'D', 'B'].includes(row.direction)) {
+      throw new Error(`Row ${idx}: Invalid direction '${row.direction}'. Allowed: R, D, B`);
+    }
+
+    return row;
+  });
+
+const cypherUpsertOacBatch = `
+  UNWIND $rows AS row
+  WITH
+    row,
+    datetime(row.postingDate) AS incomingPosting,
+    toUpper(row.schedStatus)  AS schedStatus,
+    toUpper(row.cycle)        AS cycle,
+    toUpper(row.locQTI)       AS locQTI,
+    toUpper(row.direction)    AS direction,
+    toUpper(row.flowIndicator) AS flowIndicator,
+    toUpper(row.grossOrNet)   AS grossOrNet,
+    toUpper(row.itIndicator)  AS itIndicator
+
+  MERGE (oac:OperationallyAvailableCapacity {
+    pipelineCode:   row.pipelineCode,
+    cycle:          cycle,
+    flowDate:       date(row.flowDate),
+    locationId:     row.locationId,
+    locPurpDesc:    row.locPurpDesc,
+    locQTI:         locQTI,
+    direction:      direction,
+    flowIndicator:  flowIndicator,
+    grossOrNet:     grossOrNet,
+    schedStatus:    schedStatus
+  })
+  ON CREATE SET
+    oac.createdAt = datetime(),
+    oac.postingDate = incomingPosting
+
+  WITH row, oac, incomingPosting,
+      CASE
+        WHEN oac.postingDate IS NULL THEN true
+        WHEN incomingPosting >= oac.postingDate THEN true
+        ELSE false
+      END AS shouldUpdate
+
+  FOREACH (_ IN CASE WHEN shouldUpdate THEN [1] ELSE [] END |
+    SET
+      oac.postingDate = incomingPosting,
+      oac.locationName = row.locationName,
+      oac.designCapacity = toInteger(row.designCapacity),
+      oac.operatingCapacity = toInteger(row.operatingCapacity),
+      oac.operationallyAvailableCapacity = toInteger(row.operationallyAvailableCapacity),
+      oac.totalSchedQty = toInteger(row.totalSchedQty),
+      oac.itIndicator = row.itIndicator,
+      oac.updatedAt = datetime()
+  )
+
+  WITH row, oac, shouldUpdate
+  OPTIONAL MATCH (l:Location {pipelineCode: row.pipelineCode, locationId: row.locationId})
+  FOREACH (_ IN CASE WHEN l IS NULL OR NOT shouldUpdate THEN [] ELSE [1] END |
+    MERGE (l)-[:HAS_AVAILABLE_CAPACITY]->(oac)
+  )
+
+  WITH collect({
+    key: {
+      pipelineCode: row.pipelineCode,
+      cycle:        oac.cycle,
+      flowDate:     toString(oac.flowDate),
+      locationId:   oac.locationId,
+      locPurpDesc:  oac.locPurpDesc,
+      locQTI:       oac.locQTI,
+      direction:    oac.direction,
+      flowIndicator:oac.flowIndicator,
+      grossOrNet:   oac.grossOrNet,
+      schedStatus:  oac.schedStatus
+    },
+    postingDate: toString(oac.postingDate),
+    applied: shouldUpdate,
+    outcome: CASE WHEN shouldUpdate THEN 'UPDATED' ELSE 'IGNORED_STALE_POSTINGDATE' END
+  }) AS results
+
+  RETURN
+    results,
+    {
+      received: size(results),
+      applied:  size([r IN results WHERE r.applied]),
+      ignored:  size([r IN results WHERE NOT r.applied])
+    } AS counts;
+`;
+
+  // Single write query call
+  const neo = await runQuery(cypherUpsertOacBatch, { rows }, 'WRITE');
+
+  // Query returns exactly one record with { results, counts }
+  const rec = neo.records[0];
+  const counts = rec.get('counts');   // Neo4j Map
+  const results = rec.get('results'); // list of maps
+
+  // Convert Neo4j map/list to plain JSON if needed
+  // If your driver returns native JS objects already, this is fine as-is.
+  // If you use a toPlain() helper, use it here:
+  const countsPlain = typeof toPlain === 'function' ? toPlain(counts) : counts;
+  const resultsPlain = typeof toPlain === 'function' ? toPlain(results) : results;
+
+  let finalResults = resultsPlain;
+  if (onlyFailures) {
+    finalResults = resultsPlain.filter(r => !r.applied);
+  }
+
+  const response = {
+    pipelineCode,
+    counts: countsPlain
+  };
+
+  if (includeResults) {
+    response.results = finalResults;
+  }
+
+  // 200 OK for PUT
+  return res.status(200).json(response);
 });
 
 // GET /api/v1/pipelines/:pipelineCode/flows/:startDate/:endDate?limit=100&skip=0  — fetch meter volumes for a pipeline and date range w/ pagination
@@ -2153,7 +2688,7 @@ app.post('/api/v1/notices/:pipeline', async (req, res) => {
 
   try {
     const result = await runQuery(cypher, { pipelineCode, notices: normalized }, 'WRITE');
-    const created = result.records.map(r => r.get('n').properties);
+    const created = result.records.map(r => toPlain(r.get('n').properties));
     return res.status(201).json({ pipelineCode, count: created.length, notices: created });
   } catch (e) {
     if (String(e.code || '').includes('ConstraintValidationFailed')) {
@@ -2351,6 +2886,16 @@ async function getCapacityAndUtilizationAtLocation(
   };
 }
 
+// Helper function to fetch valid Zone names for a pipeline 
+// todo: cache results to avoid repeated queries
+async function fetchZoneNamesForPipeline(runQuery, pipelineCode) {
+  const cypher = `
+    MATCH (z:Zone {pipelineCode: $pipelineCode})
+    RETURN collect(z.name) AS names
+  `;
+  const r = await runQuery(cypher, { pipelineCode });
+  return new Set(r.records[0].get('names'));
+}
 
 // Helper function to map over items with a concurrency limit to avoid overwhelming the database
 async function mapWithConcurrency(items, limit, mapper) {
