@@ -9,6 +9,7 @@ import {
   validateZone
 } from './validators/locationValidator.js';
 import { ValidationError } from './validators/common.js';
+import { validateOacBatch } from './validators/operationallyAvailableCapacityValidator.js'
 
 
 // ---- Config ----
@@ -705,7 +706,13 @@ swaggerSpec.paths = {
       summary: 'Ingest Operationally Available Capacity for a pipeline',
       tags: ['Volume'],
       parameters: [
-        { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' }
+        { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'onlyFailures', in: 'query', required: false, schema: { type: 'boolean', default: true },
+          description: 'If true, only return records that failed validation'
+        },
+        { name: 'includeResults', in: 'query', required: false, schema: { type: 'boolean', default: false },
+          description: 'If true, include all records in the response with indication of success/failure'
+        }
       ],
       requestBody: {
         required: true,
@@ -2135,19 +2142,19 @@ app.get('/api/v1/pipelines/:pipelineCode/capacities/operationally-available', as
 
 // todo: clean up these temporary validation helpers and move into a capacityValidator.js file
 const mustStr = (v, field, rowIdx) => {
-  // empty strings are ok for *optional* fields
+  // this just ensures the field is present as a string data type. A validator should check allowed values separately.
   if (v === undefined || v === null) {
-    throw new Error(`Row ${rowIdx}: Missing required field: ${field}`);
+    throw new ValidationError(`Row ${rowIdx}: Missing required field: ${field}`);
   }
   return String(v).trim();
 };
 
 const mustNum = (v, field, rowIdx) => {
   if (v === undefined || v === null || String(v).trim() === '') {
-    throw new Error(`Row ${rowIdx}: Missing required field: ${field}`);
+    throw new ValidationError(`Row ${rowIdx}: Missing required field: ${field}`);
   }
   const n = Number(v);
-  if (!Number.isFinite(n)) throw new Error(`Row ${rowIdx}: ${field} must be a number`);
+  if (!Number.isFinite(n)) throw new ValidationError(`Row ${rowIdx}: ${field} must be a number`);
   return n;
 };
 
@@ -2173,20 +2180,20 @@ app.put('/api/v1/pipelines/:pipelineCode/capacities/operationally-available', as
   const includeResults = parseBool(req.query.includeResults, true);  // allow counts-only response
 
   // Normalize + validate
-  const rows = incomingRows.map((r, idx) => {
-    const row = {
-      pipelineCode, // enforce from route
-
+  let rows;
+  try {
+    rows = incomingRows.map((r, idx) => ({
+      pipelineCode,
       cycle: mustStr(r.cycle, 'cycle', idx).toUpperCase(),
-      flowDate: mustStr(r.flowDate, 'flowDate', idx),                 // "YYYY-MM-DD"
-      postingDate: mustStr(r.postingDatetime, 'postingDatetime', idx),         // ISO datetime
+      flowDate: mustStr(r.flowDate, 'flowDate', idx),
+      postingDate: mustStr(r.postingDate, 'postingDate', idx),
 
       locationId: mustStr(r.locationId, 'locationId', idx),
       locationName: mustStr(r.locationName, 'locationName', idx),
 
       locPurpDesc: mustStr(r.locPurpDesc, 'locPurpDesc', idx),
       locQTI: mustStr(r.locQTI, 'locQTI', idx).toUpperCase(),
-      direction: mustStr(r.direction, 'direction', idx).toUpperCase(),
+      direction: mustStr(r.direction, 'direction', idx),
       flowIndicator: mustStr(r.flowIndicator, 'flowIndicator', idx).toUpperCase(),
       grossOrNet: mustStr(r.grossOrNet, 'grossOrNet', idx).toUpperCase(),
       schedStatus: mustStr(r.schedStatus, 'schedStatus', idx).toUpperCase(),
@@ -2197,96 +2204,101 @@ app.put('/api/v1/pipelines/:pipelineCode/capacities/operationally-available', as
       totalSchedQty: mustNum(r.totalSchedQty, 'totalSchedQty', idx),
 
       itIndicator: mustStr(r.itIndicator, 'itIndicator', idx).toUpperCase()
-    };
+    }));
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
 
-    // Optional: direction enum check
-    if (!['R', 'D', 'B'].includes(row.direction)) {
-      throw new Error(`Row ${idx}: Invalid direction '${row.direction}'. Allowed: R, D, B`);
+  try {
+    validateOacBatch(rows);
+  } catch (e) {
+    if (e instanceof ValidationError) {
+      return res.status(400).json({ error: e.message, details: e.details });
     }
+    return res.status(400).json({ error: e.message });
+  }
 
-    return row;
-  });
+  // Cypher query to upsert batch of OAC records
+  const cypherUpsertOacBatch = `
+    UNWIND $rows AS row
+    WITH
+      row,
+      datetime(row.postingDate) AS incomingPosting,
+      toUpper(row.schedStatus)  AS schedStatus,
+      toUpper(row.cycle)        AS cycle,
+      toUpper(row.locQTI)       AS locQTI,
+      toUpper(row.direction)    AS direction,
+      toUpper(row.flowIndicator) AS flowIndicator,
+      toUpper(row.grossOrNet)   AS grossOrNet,
+      toUpper(row.itIndicator)  AS itIndicator
 
-const cypherUpsertOacBatch = `
-  UNWIND $rows AS row
-  WITH
-    row,
-    datetime(row.postingDate) AS incomingPosting,
-    toUpper(row.schedStatus)  AS schedStatus,
-    toUpper(row.cycle)        AS cycle,
-    toUpper(row.locQTI)       AS locQTI,
-    toUpper(row.direction)    AS direction,
-    toUpper(row.flowIndicator) AS flowIndicator,
-    toUpper(row.grossOrNet)   AS grossOrNet,
-    toUpper(row.itIndicator)  AS itIndicator
+    MERGE (oac:OperationallyAvailableCapacity {
+      pipelineCode:   row.pipelineCode,
+      cycle:          cycle,
+      flowDate:       date(row.flowDate),
+      locationId:     row.locationId,
+      locPurpDesc:    row.locPurpDesc,
+      locQTI:         locQTI,
+      direction:      direction,
+      flowIndicator:  flowIndicator,
+      grossOrNet:     grossOrNet,
+      schedStatus:    schedStatus
+    })
+    ON CREATE SET
+      oac.createdAt = datetime(),
+      oac.postingDate = incomingPosting
 
-  MERGE (oac:OperationallyAvailableCapacity {
-    pipelineCode:   row.pipelineCode,
-    cycle:          cycle,
-    flowDate:       date(row.flowDate),
-    locationId:     row.locationId,
-    locPurpDesc:    row.locPurpDesc,
-    locQTI:         locQTI,
-    direction:      direction,
-    flowIndicator:  flowIndicator,
-    grossOrNet:     grossOrNet,
-    schedStatus:    schedStatus
-  })
-  ON CREATE SET
-    oac.createdAt = datetime(),
-    oac.postingDate = incomingPosting
+    WITH row, oac, incomingPosting,
+        CASE
+          WHEN oac.postingDate IS NULL THEN true
+          WHEN incomingPosting >= oac.postingDate THEN true
+          ELSE false
+        END AS shouldUpdate
 
-  WITH row, oac, incomingPosting,
-      CASE
-        WHEN oac.postingDate IS NULL THEN true
-        WHEN incomingPosting >= oac.postingDate THEN true
-        ELSE false
-      END AS shouldUpdate
+    FOREACH (_ IN CASE WHEN shouldUpdate THEN [1] ELSE [] END |
+      SET
+        oac.postingDate = incomingPosting,
+        oac.locationName = row.locationName,
+        oac.designCapacity = toInteger(row.designCapacity),
+        oac.operatingCapacity = toInteger(row.operatingCapacity),
+        oac.operationallyAvailableCapacity = toInteger(row.operationallyAvailableCapacity),
+        oac.totalSchedQty = toInteger(row.totalSchedQty),
+        oac.itIndicator = row.itIndicator,
+        oac.updatedAt = datetime()
+    )
 
-  FOREACH (_ IN CASE WHEN shouldUpdate THEN [1] ELSE [] END |
-    SET
-      oac.postingDate = incomingPosting,
-      oac.locationName = row.locationName,
-      oac.designCapacity = toInteger(row.designCapacity),
-      oac.operatingCapacity = toInteger(row.operatingCapacity),
-      oac.operationallyAvailableCapacity = toInteger(row.operationallyAvailableCapacity),
-      oac.totalSchedQty = toInteger(row.totalSchedQty),
-      oac.itIndicator = row.itIndicator,
-      oac.updatedAt = datetime()
-  )
+    WITH row, oac, shouldUpdate
+    OPTIONAL MATCH (l:Location {pipelineCode: row.pipelineCode, locationId: row.locationId})
+    FOREACH (_ IN CASE WHEN l IS NULL OR NOT shouldUpdate THEN [] ELSE [1] END |
+      MERGE (l)-[:HAS_AVAILABLE_CAPACITY]->(oac)
+    )
 
-  WITH row, oac, shouldUpdate
-  OPTIONAL MATCH (l:Location {pipelineCode: row.pipelineCode, locationId: row.locationId})
-  FOREACH (_ IN CASE WHEN l IS NULL OR NOT shouldUpdate THEN [] ELSE [1] END |
-    MERGE (l)-[:HAS_AVAILABLE_CAPACITY]->(oac)
-  )
+    WITH collect({
+      key: {
+        pipelineCode: row.pipelineCode,
+        cycle:        oac.cycle,
+        flowDate:     toString(oac.flowDate),
+        locationId:   oac.locationId,
+        locPurpDesc:  oac.locPurpDesc,
+        locQTI:       oac.locQTI,
+        direction:    oac.direction,
+        flowIndicator:oac.flowIndicator,
+        grossOrNet:   oac.grossOrNet,
+        schedStatus:  oac.schedStatus
+      },
+      postingDate: toString(oac.postingDate),
+      applied: shouldUpdate,
+      outcome: CASE WHEN shouldUpdate THEN 'UPDATED' ELSE 'IGNORED_STALE_POSTINGDATE' END
+    }) AS results
 
-  WITH collect({
-    key: {
-      pipelineCode: row.pipelineCode,
-      cycle:        oac.cycle,
-      flowDate:     toString(oac.flowDate),
-      locationId:   oac.locationId,
-      locPurpDesc:  oac.locPurpDesc,
-      locQTI:       oac.locQTI,
-      direction:    oac.direction,
-      flowIndicator:oac.flowIndicator,
-      grossOrNet:   oac.grossOrNet,
-      schedStatus:  oac.schedStatus
-    },
-    postingDate: toString(oac.postingDate),
-    applied: shouldUpdate,
-    outcome: CASE WHEN shouldUpdate THEN 'UPDATED' ELSE 'IGNORED_STALE_POSTINGDATE' END
-  }) AS results
-
-  RETURN
-    results,
-    {
-      received: size(results),
-      applied:  size([r IN results WHERE r.applied]),
-      ignored:  size([r IN results WHERE NOT r.applied])
-    } AS counts;
-`;
+    RETURN
+      results,
+      {
+        received: size(results),
+        applied:  size([r IN results WHERE r.applied]),
+        ignored:  size([r IN results WHERE NOT r.applied])
+      } AS counts;
+  `;
 
   // Single write query call
   const neo = await runQuery(cypherUpsertOacBatch, { rows }, 'WRITE');
