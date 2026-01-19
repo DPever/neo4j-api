@@ -22,8 +22,11 @@ export function validateOacRow(oac, idx = 0) {
   if (oac.itIndicator && !IT.set.has(oac.itIndicator)) add(`Invalid itIndicator '${oac.itIndicator}'. Allowed: ${IT.message()}`);
   if (oac.schedStatus && !SCHED_STATUS.set.has(oac.schedStatus)) add(`Invalid schedStatus '${oac.schedStatus}'. Allowed: ${SCHED_STATUS.message()}`);
 
-  // numeric sanity checks (no negatives, etc.)
-  const nonNegInts = ['designCapacity','operatingCapacity','operationallyAvailableCapacity','totalSchedQty'];
+  // required numeric fields
+  if (!Number.isFinite(oac.operationallyAvailableCapacity)) add(`${oac.operationallyAvailableCapacity} must be a number`);
+
+  // required non-negative integer fields
+  const nonNegInts = ['designCapacity','operatingCapacity','totalSchedQty'];
   for (const f of nonNegInts) {
     const v = oac[f];
     if (!Number.isFinite(v)) add(`${f} must be a number`);
