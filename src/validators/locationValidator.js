@@ -39,3 +39,11 @@ export function validateZone(zone, validZones, pipelineCode) {
   }
 }
 
+export function validateType(type, validTypes) {
+  if (!validTypes.has(type)) {
+    throw new ValidationError(
+      `Invalid Location type '${type}'`,
+      { allowedTypesSample: Array.from(validTypes).slice(0, 20) }
+    );
+  }
+}

@@ -6,7 +6,8 @@ import swaggerJsdoc from 'swagger-jsdoc';
 import {
   validateDirection,
   validatePosition,
-  validateZone
+  validateZone,
+  validateType
 } from './validators/locationValidator.js';
 import { ValidationError } from './validators/common.js';
 import { validateOacBatch } from './validators/operationallyAvailableCapacityValidator.js'
@@ -466,7 +467,7 @@ swaggerSpec.paths = {
         }
       },
       responses: {
-        200: {
+        201: {
           description: 'Locations ingested',
           content: { 'application/json': { schema: {
             type: 'object',
@@ -474,9 +475,39 @@ swaggerSpec.paths = {
               locations: { type: 'array', items: { $ref: '#/components/schemas/Location' } }
             }
           } } }
-        }
+        },
+        400: { description: 'Invalid request body' },
+        409: { description: 'Conflict - e.g., duplicate location IDs' },
+        500: { description: 'Server error' }
       }
-    }
+    },
+  },
+
+  '/api/v1/pipelines/{pipelineCode}/locations/{locationId}': {
+    put: {
+      summary: 'Update (or Insert) a location where pipelineCode and locationId is the logical key for updates',
+      tags: ['Reference Data'],
+      parameters: [
+        { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'locationId', in: 'path', required: true, schema: { type: 'string' }, example: '42078' }
+      ],
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            schema: { $ref: '#/components/schemas/Location' }
+          }
+        }
+      },
+      responses: {
+        200: {
+          description: 'Location updated or created',
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/Location' } } }
+        },
+        400: { description: 'Invalid request body' },
+        500: { description: 'Server error' }
+      }
+    },
   },
 
   '/api/v1/pipelines/{pipelineCode}/connections': {
@@ -1385,14 +1416,16 @@ const normalize = (n) => {
 
   // validate fields against enums and existing zones
   const validZones = await fetchZoneNamesForPipeline(runQuery, pipelineCode);
+  const validTypes = await fetchLocationTypeCodesForPipeline(runQuery);
   try {
     for (const loc of normalized) {
       validateDirection(loc.direction);
       validatePosition(loc.position);
       validateZone(loc.zone, validZones, pipelineCode);
+      validateType(loc.type, validTypes, pipelineCode);
     }
   } catch (e) {
-    return res.status(400).json({ error: e.message });
+    return res.status(400).json({ error: e.message, details: e.details });
   }
 
   const cypher = `
@@ -1438,6 +1471,147 @@ const normalize = (n) => {
   } catch (e) {
     if (String(e.code || '').includes('ConstraintValidationFailed')) {
       return res.status(409).json({ error: 'One or more locations already exist (constraint violation)' });
+    }
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// PUT /api/v1/pipelines/:pipelineCode/locations/:locationId — upsert a single Location
+// Body: { name, direction, zone, marketArea, type, effectiveDate, endDate?, state?, county?, country?, pipelineSegmentCode?, primaryDataSource, primaryDataAsOf, position?, positionDataSource?, positionDataAsOf? }
+// Note: locationId is taken from route; if provided in body, must match.
+app.put('/api/v1/pipelines/:pipelineCode/locations/:locationId', async (req, res) => {
+  const pipelineCode = String(req.params.pipelineCode || '').trim().toUpperCase();
+  const locationIdParam = String(req.params.locationId || '').trim();
+
+  if (!pipelineCode) return res.status(400).json({ error: 'Missing pipelineCode in route' });
+  if (!locationIdParam) return res.status(400).json({ error: 'Missing locationId in route' });
+
+  const body = req.body ?? {};
+
+  const required = [
+    'name',
+    'direction',
+    'zone',
+    'marketArea',
+    'type',
+    'effectiveDate',
+    'primaryDataSource',
+    'primaryDataAsOf'
+  ];
+
+  const optStr = (v) => {
+    if (v === undefined || v === null) return null;
+    const s = String(v).trim();
+    return s === '' ? null : s;
+  };
+
+  const normalize = (n) => {
+    // If client includes locationId in body, require it matches the route
+    const bodyLocationId = optStr(n.locationId);
+    if (bodyLocationId && bodyLocationId !== locationIdParam) {
+      throw new Error(`Body locationId '${bodyLocationId}' does not match route locationId '${locationIdParam}'`);
+    }
+
+    for (const k of required) {
+      if (n[k] === undefined || n[k] === null || String(n[k]).trim() === '') {
+        throw new Error(`Missing required field: ${k}`);
+      }
+    }
+
+    return {
+      // Identity from route
+      locationId: locationIdParam,
+
+      name: String(n.name).trim(),
+      direction: String(n.direction).trim(),
+      zone: String(n.zone).trim(),
+      marketArea: String(n.marketArea).trim(),
+      type: String(n.type).trim(),
+
+      effectiveDate: String(n.effectiveDate).trim(),
+      endDate: optStr(n.endDate),
+
+      state: optStr(n.state),
+      county: optStr(n.county),
+      country: optStr(n.country),
+      pipelineSegmentCode: optStr(n.pipelineSegmentCode),
+
+      primaryDataSource: String(n.primaryDataSource).trim(),
+      primaryDataAsOf: String(n.primaryDataAsOf).trim(),
+
+      position: n.position ?? null, // { latitude, longitude } or null
+
+      positionDataSource: optStr(n.positionDataSource),
+      positionDataAsOf: optStr(n.positionDataAsOf)
+    };
+  };
+
+  let loc;
+  try {
+    loc = normalize(body);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+
+  // validate fields against enums and existing zones
+  const validZones = await fetchZoneNamesForPipeline(runQuery, pipelineCode);
+  const validTypes = await fetchLocationTypeCodesForPipeline(runQuery);
+  try {
+    validateDirection(loc.direction);
+    validatePosition(loc.position);
+    validateZone(loc.zone, validZones, pipelineCode);
+    validateType(loc.type, validTypes, pipelineCode);
+  } catch (e) {
+    return res.status(400).json({ error: e.message, details: e.details });
+  }
+
+  const cypher = `
+    MERGE (n:Location { pipelineCode: $pipelineCode, locationId: $locationId })
+    ON CREATE SET
+      n.createdAt = datetime(),
+      n._wasCreated = true
+    WITH n, coalesce(n._wasCreated, false) AS wasCreated
+
+    SET
+      n.name = $name,
+      n.direction = $direction,
+      n.zone = $zone,
+      n.marketArea = $marketArea,
+      n.type = $type,
+      n.effectiveDate = date($effectiveDate),
+      n.endDate = CASE WHEN $endDate IS NULL THEN NULL ELSE date($endDate) END,
+      n.state = $state,
+      n.county = $county,
+      n.country = $country,
+      n.pipelineSegmentCode = $pipelineSegmentCode,
+      n.primaryDataSource = $primaryDataSource,
+      n.primaryDataAsOf = datetime($primaryDataAsOf),
+      n.position = CASE WHEN $position IS NULL THEN NULL ELSE point($position) END,
+      n.positionDataSource = $positionDataSource,
+      n.positionDataAsOf = CASE WHEN $positionDataAsOf IS NULL THEN NULL ELSE datetime($positionDataAsOf) END,
+      n.updatedAt = datetime()
+
+    REMOVE n._wasCreated
+
+    RETURN
+      n AS node,
+      CASE WHEN wasCreated THEN 'CREATED' ELSE 'UPDATED' END AS outcome
+  `;
+
+  try {
+    const params = { pipelineCode, locationId: loc.locationId, ...loc };
+    const result = await runQuery(cypher, params, 'WRITE');
+
+    const record = result.records[0];
+    const outcome = record.get('outcome');
+    const location = toPlain(record.get('node').properties);
+
+    // Keep it simple: 200 for both outcomes
+    return res.status(200).json({ pipelineCode, locationId: loc.locationId, outcome, location });
+  } catch (e) {
+    // With your unique constraint, this should be rare here (MERGE), but keep defensive handling
+    if (String(e.code || '').includes('ConstraintValidationFailed')) {
+      return res.status(409).json({ error: 'Constraint violation' });
     }
     return res.status(500).json({ error: e.message });
   }
@@ -2907,6 +3081,17 @@ async function fetchZoneNamesForPipeline(runQuery, pipelineCode) {
   `;
   const r = await runQuery(cypher, { pipelineCode });
   return new Set(r.records[0].get('names'));
+}
+
+// Helper function to fetch valid LocationType codes 
+// todo: cache results to avoid repeated queries
+async function fetchLocationTypeCodesForPipeline(runQuery) {
+  const cypher = `
+    MATCH (lt:LocationType)
+    RETURN collect(lt.code) AS codes
+  `;
+  const r = await runQuery(cypher);
+  return new Set(r.records[0].get('codes'));
 }
 
 // Helper function to map over items with a concurrency limit to avoid overwhelming the database
