@@ -129,6 +129,7 @@ const swaggerOptions = {
             pipelineCode: { type: 'string' },
             noticeId: { type: 'string' },
             postingDatetime: { type: 'string', format: 'date-time' },
+            lastModifiedDatetime: { type: 'string', format: 'date-time' },
             noticeType: { type: 'string' },
             category: { type: 'string' },
             status: { type: 'string' },
@@ -502,7 +503,16 @@ swaggerSpec.paths = {
       responses: {
         200: {
           description: 'Location updated or created',
-          content: { 'application/json': { schema: { $ref: '#/components/schemas/Location' } } }
+          content: { 'application/json': {
+            schema: { 
+              type: 'object',
+              properties: {
+                pipelineCode: { type: 'string' },
+                locationId: { type: 'string' },
+                outcome: { type: 'string' },
+                location: { $ref: '#/components/schemas/Location' }
+              }
+            } } }
         },
         400: { description: 'Invalid request body' },
         500: { description: 'Server error' }
@@ -2661,6 +2671,7 @@ app.get('/api/v1/pipelines/:pipelineCode/notices', async (req, res) => {
       n.status              AS status,
       n.subject             AS subject,
       n.priorNoticeId       AS priorNoticeId,
+      n.lastModifiedDatetime AS lastModifiedDatetime,
       n.effectiveDatetime   AS effectiveDatetime,
       n.endDatetime         AS endDatetime,
       n.content             AS content
@@ -2793,7 +2804,7 @@ app.get('/api/v1/pipelines/:pipelineCode/constraints', async (req, res) => {
 });
 
 // POST /api/v1/notices/:pipeline  — create a new Notice on a pipeline
-// Body: { noticeId, category, noticeType, content, effectiveDatetime, endDatetime?, postingDatetime, status, subject, priorNoticeId? }
+// Body: { noticeId, category, noticeType, content, effectiveDatetime, endDatetime?, postingDatetime, lastModifiedDatetime?, subject, priorNoticeId? }
 app.post('/api/v1/notices/:pipeline', async (req, res) => {
   const pipelineCode = req.params.pipeline;
   const body = req.body ?? {};
@@ -2816,7 +2827,7 @@ app.post('/api/v1/notices/:pipeline', async (req, res) => {
     'status',
     'subject'
   ];
-  // endDatetime and priorNoticeId are optional
+  // endDatetime, lastModifiedDatetime, and priorNoticeId are optional
 
   const normalize = (n) => {
     for (const k of required) {
@@ -2834,6 +2845,9 @@ app.post('/api/v1/notices/:pipeline', async (req, res) => {
         ? null
         : String(n.endDatetime).trim(),
       postingDatetime: String(n.postingDatetime).trim(),
+      lastModifiedDatetime: (n.lastModifiedDatetime === undefined || n.lastModifiedDatetime === null || String(n.lastModifiedDatetime).trim() === '')
+        ? n.postingDatetime
+        : String(n.lastModifiedDatetime).trim(),
       status: String(n.status).trim(),
       subject: String(n.subject).trim(),
       priorNoticeId: (n.priorNoticeId === undefined || n.priorNoticeId === null || String(n.priorNoticeId).trim() === '')
@@ -2851,25 +2865,33 @@ app.post('/api/v1/notices/:pipeline', async (req, res) => {
 
   const cypher = `
     UNWIND $notices AS notice
-    CREATE (n:Notice {
-      pipelineCode: $pipelineCode,
-      noticeId: notice.noticeId,
-      category: notice.category,
-      noticeType: notice.noticeType,
-      content: notice.content,
-      effectiveDatetime: datetime(notice.effectiveDatetime),
-      endDatetime: CASE
-        WHEN notice.endDatetime IS NULL THEN NULL
-        ELSE datetime(notice.endDatetime)
-      END,
-      postingDatetime: datetime(notice.postingDatetime),
-      status: notice.status,
-      subject: notice.subject,
-      priorNoticeId: notice.priorNoticeId,
-      createdAt: datetime(),
-      updatedAt: datetime()
-    })
-    RETURN n
+    WITH notice, datetime(notice.lastModifiedDatetime) AS incomingMod
+    MERGE (n:Notice { pipelineCode: $pipelineCode, noticeId: notice.noticeId })
+    ON CREATE SET
+      n.createdAt = datetime()
+
+    WITH n, notice, incomingMod,
+        CASE
+          WHEN n.lastModifiedDatetime IS NULL THEN true
+          WHEN incomingMod >= n.lastModifiedDatetime THEN true
+          ELSE false
+        END AS shouldUpdate
+
+    FOREACH (_ IN CASE WHEN shouldUpdate THEN [1] ELSE [] END |
+      SET
+        n.category = notice.category,
+        n.noticeType = notice.noticeType,
+        n.content = notice.content,
+        n.effectiveDatetime = datetime(notice.effectiveDatetime),
+        n.endDatetime = CASE WHEN notice.endDatetime IS NULL THEN NULL ELSE datetime(notice.endDatetime) END,
+        n.postingDatetime = datetime(notice.postingDatetime),
+        n.status = notice.status,
+        n.subject = notice.subject,
+        n.priorNoticeId = notice.priorNoticeId,
+        n.lastModifiedDatetime = incomingMod,
+        n.updatedAt = datetime()
+    )
+    RETURN n;
   `;
 
   try {
