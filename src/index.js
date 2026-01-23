@@ -748,12 +748,6 @@ swaggerSpec.paths = {
       tags: ['Volume'],
       parameters: [
         { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
-        { name: 'onlyFailures', in: 'query', required: false, schema: { type: 'boolean', default: true },
-          description: 'If true, only return records that failed validation'
-        },
-        { name: 'includeResults', in: 'query', required: false, schema: { type: 'boolean', default: false },
-          description: 'If true, include all records in the response with indication of success/failure'
-        }
       ],
       requestBody: {
         required: true,
@@ -762,10 +756,7 @@ swaggerSpec.paths = {
             schema: {
               type: 'object',
               properties: {
-                records: {
-                  type: 'array',
-                  items: { $ref: '#/components/schemas/OperationallyAvailableCapacity' }
-                }
+                records: { type: 'array', items: { $ref: '#/components/schemas/OperationallyAvailableCapacity' } }
               }
             }
           }
@@ -777,7 +768,14 @@ swaggerSpec.paths = {
           content: { 'application/json': { schema: {
             type: 'object',
             properties: {
-              operationallyAvailableCapacity: { type: 'array', items: { $ref: '#/components/schemas/OperationallyAvailableCapacity' } }
+                counts: {
+                  type: 'object',
+                  properties: {
+                    received: { type: 'integer' },
+                    applied: { type: 'integer' },
+                    ignored: { type: 'integer' }
+                  }
+                }
             }
           } } }
         }
@@ -2358,11 +2356,6 @@ app.put('/api/v1/pipelines/:pipelineCode/capacities/operationally-available', as
     return res.status(400).json({ error: 'Too many records provided; submit batches with fewer than 200 records' });
   }
 
-  // Query params to control response payload size
-  // todo: add these params to the swagger API docs
-  const onlyFailures = parseBool(req.query.onlyFailures, false);     // return only ignored rows
-  const includeResults = parseBool(req.query.includeResults, true);  // allow counts-only response
-
   // Normalize + validate
   let rows;
   try {
@@ -2408,31 +2401,31 @@ app.put('/api/v1/pipelines/:pipelineCode/capacities/operationally-available', as
     WITH
       row,
       datetime(row.postingDate) AS incomingPosting,
-      toUpper(row.schedStatus)  AS schedStatus,
-      toUpper(row.cycle)        AS cycle,
-      toUpper(row.locQTI)       AS locQTI,
-      toUpper(row.direction)    AS direction,
+      toUpper(row.schedStatus)   AS schedStatus,
+      toUpper(row.cycle)         AS cycle,
+      toUpper(row.locQTI)        AS locQTI,
+      toUpper(row.direction)     AS direction,
       toUpper(row.flowIndicator) AS flowIndicator,
-      toUpper(row.grossOrNet)   AS grossOrNet,
-      toUpper(row.itIndicator)  AS itIndicator
+      toUpper(row.grossOrNet)    AS grossOrNet,
+      toUpper(row.itIndicator)   AS itIndicator
 
     MERGE (oac:OperationallyAvailableCapacity {
-      pipelineCode:   row.pipelineCode,
-      cycle:          cycle,
-      flowDate:       date(row.flowDate),
-      locationId:     row.locationId,
-      locPurpDesc:    row.locPurpDesc,
-      locQTI:         locQTI,
-      direction:      direction,
-      flowIndicator:  flowIndicator,
-      grossOrNet:     grossOrNet,
-      schedStatus:    schedStatus
+      pipelineCode:  row.pipelineCode,
+      cycle:         cycle,
+      flowDate:      date(row.flowDate),
+      locationId:    row.locationId,
+      locPurpDesc:   row.locPurpDesc,
+      locQTI:        locQTI,
+      direction:     direction,
+      flowIndicator: flowIndicator,
+      grossOrNet:    grossOrNet,
+      schedStatus:   schedStatus
     })
     ON CREATE SET
       oac.createdAt = datetime(),
       oac.postingDate = incomingPosting
 
-    WITH row, oac, incomingPosting,
+    WITH row, oac, incomingPosting, itIndicator,
         CASE
           WHEN oac.postingDate IS NULL THEN true
           WHEN incomingPosting >= oac.postingDate THEN true
@@ -2447,7 +2440,7 @@ app.put('/api/v1/pipelines/:pipelineCode/capacities/operationally-available', as
         oac.operatingCapacity = toInteger(row.operatingCapacity),
         oac.operationallyAvailableCapacity = toInteger(row.operationallyAvailableCapacity),
         oac.totalSchedQty = toInteger(row.totalSchedQty),
-        oac.itIndicator = row.itIndicator,
+        oac.itIndicator = itIndicator,
         oac.updatedAt = datetime()
     )
 
@@ -2457,60 +2450,30 @@ app.put('/api/v1/pipelines/:pipelineCode/capacities/operationally-available', as
       MERGE (l)-[:HAS_AVAILABLE_CAPACITY]->(oac)
     )
 
-    WITH collect({
-      key: {
-        pipelineCode: row.pipelineCode,
-        cycle:        oac.cycle,
-        flowDate:     toString(oac.flowDate),
-        locationId:   oac.locationId,
-        locPurpDesc:  oac.locPurpDesc,
-        locQTI:       oac.locQTI,
-        direction:    oac.direction,
-        flowIndicator:oac.flowIndicator,
-        grossOrNet:   oac.grossOrNet,
-        schedStatus:  oac.schedStatus
-      },
-      postingDate: toString(oac.postingDate),
-      applied: shouldUpdate,
-      outcome: CASE WHEN shouldUpdate THEN 'UPDATED' ELSE 'IGNORED_STALE_POSTINGDATE' END
-    }) AS results
-
     RETURN
-      results,
-      {
-        received: size(results),
-        applied:  size([r IN results WHERE r.applied]),
-        ignored:  size([r IN results WHERE NOT r.applied])
-      } AS counts;
+      count(*) AS received,
+      sum(CASE WHEN shouldUpdate THEN 1 ELSE 0 END) AS applied,
+      sum(CASE WHEN shouldUpdate THEN 0 ELSE 1 END) AS ignored;
   `;
 
   // Single write query call
   const neo = await runQuery(cypherUpsertOacBatch, { rows }, 'WRITE');
 
-  // Query returns exactly one record with { results, counts }
-  const rec = neo.records[0];
-  const counts = rec.get('counts');   // Neo4j Map
-  const results = rec.get('results'); // list of maps
-
-  // Convert Neo4j map/list to plain JSON if needed
-  // If your driver returns native JS objects already, this is fine as-is.
-  // If you use a toPlain() helper, use it here:
-  const countsPlain = typeof toPlain === 'function' ? toPlain(counts) : counts;
-  const resultsPlain = typeof toPlain === 'function' ? toPlain(results) : results;
-
-  let finalResults = resultsPlain;
-  if (onlyFailures) {
-    finalResults = resultsPlain.filter(r => !r.applied);
+  if (!neo.records || neo.records.length === 0) {
+    throw new Error('OAC upsert returned no results');
   }
+
+  // Cypher returns exactly one record with scalar fields
+  const rec = neo.records[0];
 
   const response = {
     pipelineCode,
-    counts: countsPlain
+    counts: {
+      received: toPlain(rec.get('received')),
+      applied:  toPlain(rec.get('applied')),
+      ignored:  toPlain(rec.get('ignored'))
+    }
   };
-
-  if (includeResults) {
-    response.results = finalResults;
-  }
 
   // 200 OK for PUT
   return res.status(200).json(response);
