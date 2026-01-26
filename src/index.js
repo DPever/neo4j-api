@@ -2445,7 +2445,13 @@ app.put('/api/v1/pipelines/:pipelineCode/capacities/operationally-available', as
     )
 
     WITH row, oac, shouldUpdate
-    OPTIONAL MATCH (l:Location {pipelineCode: row.pipelineCode, locationId: row.locationId})
+    OPTIONAL MATCH (l:Location)
+    WHERE l.pipelineCode = row.pipelineCode
+      AND (
+        l.locationId = row.locationId
+        OR l.name = row.locationName
+      )
+
     FOREACH (_ IN CASE WHEN l IS NULL OR NOT shouldUpdate THEN [] ELSE [1] END |
       MERGE (l)-[:HAS_AVAILABLE_CAPACITY]->(oac)
     )
@@ -3005,11 +3011,14 @@ async function getCapacityAndUtilizationAtLocation(
 
   const result = await runQuery(
     `
-    MATCH (n:OperationallyAvailableCapacity) 
-    WHERE n.pipelineCode = $pipelineCode
-      AND n.locationId = $locationId
-      AND n.locQTI = $locQTI
+    MATCH (l:Location)
+    WHERE l.pipelineCode = $pipelineCode
+      AND l.locationId = $locationId
+
+    MATCH (l)-[:HAS_AVAILABLE_CAPACITY]->(n:OperationallyAvailableCapacity)
+    WHERE n.locQTI = $locQTI
       AND n.flowDate = date($asOfDate)
+
     RETURN
       n.pipelineCode                    AS pipelineCode,
       n.locationId                      AS locationId,
@@ -3031,9 +3040,9 @@ async function getCapacityAndUtilizationAtLocation(
       n.schedStatus                     AS schedStatus,
       n.locQTI                          AS locQTI,
       n.locPurpDesc                     AS locPurpDesc,
-      n.ITIndicator                     AS ITIndicator,
+      n.itIndicator                     AS itIndicator,
       n.grossOrNet                      AS grossOrNet,
-      n.flowInd                         AS flowIndicator,
+      n.flowIndicator                   AS flowIndicator,
       n.direction                       AS direction,
       n.postingDate                     AS postingDatetime
     ORDER BY n.postingDate DESC
@@ -3041,6 +3050,7 @@ async function getCapacityAndUtilizationAtLocation(
     `,
     { pipelineCode, locationId, locQTI, asOfDate, limit }
   );
+
 
   const capacity = result.records.map(r => {
     const obj = {};
