@@ -1292,7 +1292,7 @@ app.get('/api/v1/location-types', async (req, res) => {
 app.get('/api/v1/pipelines/:pipelineCode/locations', async (req, res) => {
   const pipeline = req.params.pipelineCode;
   const asOfDate = req.query.asOfDate;
-  const limit = parseInt(req.query.limit) || 100;
+  const limit = parseInt(req.query.limit) || 1000;
   const skip  = parseInt(req.query.skip)  || 0;
 
   // Basic input validation
