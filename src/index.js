@@ -719,7 +719,7 @@ swaggerSpec.paths = {
           schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
           example: '2025-11-01'
         },
-        { name: 'cycle', in: 'query', required: false, schema: { type: 'string' }, description: 'Filter by cycle (e.g., TIM, EVN, ID1, ID2, ID3)' },
+        { name: 'cycle', in: 'query', required: false, schema: { type: 'string' }, description: 'Filter by cycle (e.g., TIM, EVE, ID1, ID2, ID3)' },
         { name: 'locationId', in: 'query', required: false, schema: { type: 'string' } },
         { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 1000 }, 
           description: 'maximum number of operationallyAvailableCapacity objects to return', example: '1000'
@@ -783,6 +783,33 @@ swaggerSpec.paths = {
     }
   },
 
+  '/api/v1/pipelines/{pipelineCode}/capacities/cycles-with-data': {
+    get: {
+      summary: 'Cycles for which Operationally Available Capacity data exists for a pipeline and flow date',
+      tags: ['Volume'],
+      parameters: [
+        { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'asOfDate', in: 'query', required: true, 
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2026-01-22'
+        }
+      ],
+      responses: {
+        200: {
+          description: 'Cycles with Operationally Available Capacity',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              params: { type: 'object' },
+              count: { type: 'integer' },
+              cycles: { type: 'array', items: { type: 'string' } }
+            }
+          } } }
+        }
+      }
+    },
+  },
+
   '/api/v1/pipelines/{pipelineCode}/flows/{startDate}/{endDate}': {
     get: {
       summary: 'Historic flow volumes and operational capacity at a location for a pipeline and date range',
@@ -798,7 +825,7 @@ swaggerSpec.paths = {
           example: '2025-11-30'
         },
         { name: 'locationId', in: 'query', required: false, schema: { type: 'string' } },
-        { name: 'cycle', in: 'query', required: false, schema: { type: 'string' }, description: 'Filter by cycle (e.g., TIM, EVN, ID1, ID2, ID3)' },
+        { name: 'cycle', in: 'query', required: false, schema: { type: 'string' }, description: 'Filter by cycle (e.g., TIM, EVE, ID1, ID2, ID3)' },
         { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 100 }, 
           description: 'maximum number of flow rows to return', example: '100'
         },
@@ -2483,6 +2510,45 @@ app.put('/api/v1/pipelines/:pipelineCode/capacities/operationally-available', as
 
   // 200 OK for PUT
   return res.status(200).json(response);
+});
+
+// GET /api/v1/pipelines/:pipelineCode/capacities/cycles-with-data — fetch cycles that have capacity data for a pipeline and date
+// Example: /api/v1/pipelines/ANR/capacities/cycles-with-data?asOfDate=2026-01-22
+app.get('/api/v1/pipelines/:pipelineCode/capacities/cycles-with-data', async (req, res) => {
+  const pipelineCode = req.params.pipelineCode;
+  const asOfDate = req.query.asOfDate; // required
+
+  if (!asOfDate) {
+    return res.status(400).json({ error: 'asOfDate query parameter is required' });
+  }
+
+  try {
+    const result = await runQuery(
+      `
+      MATCH (n:OperationallyAvailableCapacity)
+      WHERE n.pipelineCode = $pipelineCode
+        AND n.flowDate = date($asOfDate)
+
+      MATCH (c:Cycle)
+      WHERE c.pipelineCode = n.pipelineCode
+        AND c.cycleCode = n.cycle
+
+      RETURN DISTINCT
+        n.flowDate AS flowDate,
+        n.cycle    AS cycle,
+        c.sortOrder AS sortOrder
+      ORDER BY c.sortOrder;
+      `,
+      { pipelineCode, asOfDate }
+    );
+
+    // Map records to plain JS objects
+    const cycles = result.records.map(r => toPlain(r.toObject()));
+
+    res.json({ params: { pipelineCode, asOfDate }, count: cycles.length, cycles });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // GET /api/v1/pipelines/:pipelineCode/flows/:startDate/:endDate?limit=100&skip=0  — fetch meter volumes for a pipeline and date range w/ pagination
