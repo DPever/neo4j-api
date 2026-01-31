@@ -888,6 +888,59 @@ swaggerSpec.paths = {
     }
   },
 
+  '/api/v1/prices/symbol-trading-day': {
+    put: {
+      summary: 'Ingest prices for a symbol (aka: ticker) and trading day',
+      tags: ['Prices'],
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: {
+                prices: {
+                  type: 'array',
+                  items: { type: 'object',
+                    properties: {
+                      symbol: { type: 'string' },
+                      tradingDay: { type: 'string', format: 'date' },
+                      high: { type: 'number' },
+                      low: { type: 'number' },
+                      mid: { type: 'number' },
+                      close: { type: 'number' },
+                      volume: { type: 'integer' },
+                      modificationDatetime: { type: 'string', format: 'date-time' }
+                   }
+                  }
+                }
+              }
+            }
+          }
+        },
+      },
+      responses: {
+        200: {
+          description: 'Prices ingested',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+                counts: {
+                  type: 'object',
+                  properties: {
+                    received: { type: 'integer' },
+                    created: { type: 'integer' },
+                    updated: { type: 'integer' },
+                    failedUnknownSymbol: { type: 'integer' }
+                  }
+                }
+            }
+          } } }
+        }
+      }
+    }
+  },
+
   // DEPRECATED - to be removed in future releases
   '/notices/constrained-noms/{locationName}/{beforeDate}': {
     get: {
@@ -2630,6 +2683,102 @@ app.get('/api/v1/pipelines/:pipelineCode/prices/:startDate(\\d{4}-\\d{2}-\\d{2})
     });
 
     res.json({ params: { pipelineCode, startDate, endDate }, count: prices.length, prices, page: { skip: Number(skip), limit: Number(limit) } });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+//PUT /api/v1/prices/symbol-trading-day — upsert prices
+// Body: { prices: [ { symbol, tradingDay, high?, low?, mid?, close?, volume?, modificationDatetime? }, ... ] }
+app.put('/api/v1/prices/symbol-trading-day', async (req, res) => {
+  const body = req.body ?? {};
+  const incomingPrices = Array.isArray(body.prices) ? body.prices : [body];
+
+  if (incomingPrices.length === 0) {
+    return res.status(400).json({ error: 'No price records provided' });
+  }
+  if (incomingPrices.length > 200) {
+    return res.status(400).json({ error: 'Too many price records provided; submit batches with fewer than 200 records' });
+  }
+
+  try {
+    const result = await runQuery(
+      `
+      UNWIND $rows AS row
+      WITH
+        row,
+        toUpper(trim(row.symbol)) AS symbol,
+        date(substring(toString(row.tradingDay), 0, 10)) AS d,
+        CASE
+          WHEN row.modificationDatetime IS NULL OR trim(toString(row.modificationDatetime)) = '' THEN NULL
+          ELSE datetime(toString(row.modificationDatetime))
+        END AS modDt
+
+      // Require Symbol to exist
+      OPTIONAL MATCH (s:Symbol {code: symbol})
+      WITH row, symbol, d, modDt, s
+
+      CALL (row, symbol, d, modDt, s) {
+        // If symbol missing, emit a failure result, do not write anything
+        WITH row, symbol, d, modDt, s
+        WHERE s IS NULL
+        RETURN {
+          symbol: symbol,
+          date: toString(d),
+          outcome: 'FAILED_UNKNOWN_SYMBOL'
+        } AS r
+
+        UNION
+
+        WITH row, symbol, d, modDt, s
+        WHERE s IS NOT NULL
+
+        MERGE (td:SymbolTradingDay {symbol: symbol, date: d})
+        ON CREATE SET
+          td.ID = symbol + "_" + toString(d),
+          td.createdAt = datetime(),
+          td._justCreated = true
+        SET
+          td.high   = CASE WHEN row.high   IS NULL OR trim(toString(row.high))   = '' THEN NULL ELSE toFloat(row.high) END,
+          td.low    = CASE WHEN row.low    IS NULL OR trim(toString(row.low))    = '' THEN NULL ELSE toFloat(row.low) END,
+          td.mid    = CASE WHEN row.mid    IS NULL OR trim(toString(row.mid))    = '' THEN NULL ELSE toFloat(row.mid) END,
+          td.close  = CASE WHEN row.close  IS NULL OR trim(toString(row.close))  = '' THEN NULL ELSE toFloat(row.close) END,
+          td.volume = CASE WHEN row.volume IS NULL OR trim(toString(row.volume)) = '' THEN NULL ELSE toInteger(row.volume) END,
+          td.modificationDate = modDt,
+          td.updatedAt = datetime()
+
+        WITH s, td, coalesce(td._justCreated,false) AS isNew
+        FOREACH (_ IN CASE WHEN isNew THEN [1] ELSE [] END |
+          MERGE (s)-[:HAS_TRADING_DAY]->(td)
+        )
+        REMOVE td._justCreated
+
+        RETURN {
+          symbol: td.symbol,
+          date: toString(td.date),
+          id: td.ID,
+          outcome: CASE WHEN isNew THEN 'CREATED' ELSE 'UPDATED' END
+        } AS r
+      }
+
+      WITH collect(r) AS results
+      RETURN
+        results,
+        {
+          received: size(results),
+          created:  size([x IN results WHERE x.outcome = 'CREATED']),
+          updated:  size([x IN results WHERE x.outcome = 'UPDATED']),
+          failedUnknownSymbol: size([x IN results WHERE x.outcome = 'FAILED_UNKNOWN_SYMBOL'])
+        } AS counts;
+
+      `,
+      { rows: incomingPrices },
+      'WRITE'
+    );
+
+    const counts = result.records[0].get('counts');
+    res.json({ received: toPlain(counts.received), created: toPlain(counts.created),
+       updated: toPlain(counts.updated), failedUnknownSymbol: toPlain(counts.failedUnknownSymbol) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
