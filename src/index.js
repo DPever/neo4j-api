@@ -1025,6 +1025,7 @@ swaggerSpec.paths = {
         },
         { name: 'category', in: 'query', required: false, schema: { type: 'string' }, description: 'category (e.g., Critical, Non-Critical)' },
         { name: 'noticeType', in: 'query', required: false, schema: { type: 'string' }, description: 'noticeType (e.g., Capacity Constraint, Curtailment, Force Majeure)' },
+        { name: 'approved', in: 'query', required: false, schema: { type: 'boolean' }, description: 'Filter by approved status' },
         { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 100 }, 
           description: 'maximum number of flow rows to return', example: '100'
         },
@@ -1065,6 +1066,40 @@ swaggerSpec.paths = {
             properties: {
               pipelineCode: { type: 'string' },
               notice: { type: 'object' }
+            }
+          } } }
+        }
+      }
+    },
+    patch: {
+      summary: 'Update a notice on a pipeline',
+      tags: ['Notices'],
+      parameters: [
+        { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'noticeId', in: 'path', required: true, schema: { type: 'string' }, example: '12345' }
+      ],
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: {
+                approved: { type: 'boolean' }
+              }
+            }
+          }
+        }
+      },
+      responses: {
+        200: {
+          description: 'Notice updated',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              pipelineCode: { type: 'string' },
+              noticeId: { type: 'string' },
+              isApproved: { type: 'boolean' }
             }
           } } }
         }
@@ -2823,7 +2858,12 @@ app.get('/path', async (req, res) => {
 app.get('/api/v1/pipelines/:pipelineCode/notices', async (req, res) => {
   const pipelineCode = req.params.pipelineCode;
   const { category, noticeType, startDate, endDate, limit = 100, skip = 0 } = req.query;
-  
+
+  const approvedParam = req.query.approved;
+  const approved =
+    approvedParam === undefined ? undefined :
+    String(approvedParam).toLowerCase() === 'true';
+
   // startDate and endDate are required
   if (!startDate || !endDate) {
     return res.status(400).json({ error: 'startDate and endDate are required query params' });
@@ -2839,12 +2879,14 @@ app.get('/api/v1/pipelines/:pipelineCode/notices', async (req, res) => {
 
   const categoryFilter = category ? `AND n.category = $category` : '';
   const typeFilter = noticeType ? `AND n.noticeType = $noticeType` : '';
+  const approvedFilter = approved === undefined ? '' : `AND coalesce(n.approved, false) = $approved`;
 
   const cypher = `
     ${baseMatch}
     ${timeFilter}
     ${categoryFilter}
     ${typeFilter}
+    ${approvedFilter}
     WITH n ORDER BY n.endDatetime DESC, n.effectiveDatetime DESC SKIP toInteger($skip) LIMIT toInteger($limit)
     RETURN
       n.pipelineCode        AS pipelineCode,
@@ -2858,15 +2900,12 @@ app.get('/api/v1/pipelines/:pipelineCode/notices', async (req, res) => {
       n.lastModifiedDatetime AS lastModifiedDatetime,
       n.effectiveDatetime   AS effectiveDatetime,
       n.endDatetime         AS endDatetime,
-      n.content             AS content
+      n.content             AS content,
+      coalesce(n.approved, false) AS isApproved
   `;
 
   try {
-    const result = await runQuery(cypher, { pipelineCode, startDate, endDate, category, noticeType, limit: Number(limit), skip: Number(skip) });
-    //const notices =
-    //  result.records.length > 0
-    //    ? toPlain(result.records[0].get('notices'))
-    //    : [];
+    const result = await runQuery(cypher, { pipelineCode, startDate, endDate, category, noticeType, approved, limit: Number(limit), skip: Number(skip) });
 
     // Map records to plain JS objects
     const notices = result.records.map(r => {
@@ -3086,6 +3125,59 @@ app.post('/api/v1/notices/:pipeline', async (req, res) => {
     if (String(e.code || '').includes('ConstraintValidationFailed')) {
       return res.status(409).json({ error: 'One or more notices already exist (constraint violation)' });
     }
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// PATCH /api/v1/pipelines/:pipelineCode/notices/:noticeId — toggle approved flag (global)
+// Body: { approved: true|false }
+app.patch('/api/v1/pipelines/:pipelineCode/notices/:noticeId', async (req, res) => {
+  const pipelineCode = String(req.params.pipelineCode ?? '').trim().toUpperCase();
+  const noticeId = String(req.params.noticeId ?? '').trim();
+
+  if (!pipelineCode) return res.status(400).json({ error: 'Missing pipeline' });
+  if (!noticeId) return res.status(400).json({ error: 'Missing noticeId' });
+
+  const body = req.body ?? {};
+
+  // Enforce only { approved } to avoid accidental writes from UI
+  const allowedKeys = new Set(['approved']);
+  const keys = Object.keys(body);
+  const extra = keys.filter(k => !allowedKeys.has(k));
+  if (extra.length) {
+    return res.status(400).json({ error: `Unexpected field(s): ${extra.join(', ')}` });
+  }
+
+  if (body.approved === undefined || body.approved === null) {
+    return res.status(400).json({ error: 'Missing required field: approved' });
+  }
+  if (typeof body.approved !== 'boolean') {
+    return res.status(400).json({ error: 'approved must be boolean (true/false)' });
+  }
+
+  const approved = body.approved;
+
+  const cypher = `
+    MATCH (n:Notice { pipelineCode: $pipelineCode, noticeId: $noticeId })
+    SET
+      n.approved = $approved
+    RETURN
+      n.pipelineCode AS pipelineCode,
+      n.noticeId AS noticeId,
+      coalesce(n.approved, false) AS isApproved
+  `;
+
+  try {
+    const result = await runQuery(cypher, { pipelineCode, noticeId, approved }, 'WRITE');
+    if (!result.records.length) {
+      return res.status(404).json({ error: 'Notice not found', pipelineCode, noticeId });
+    }
+
+    const rec = result.records[0];
+    const payload = {};
+    for (const key of rec.keys) payload[key] = toPlain(rec.get(key));
+    return res.status(200).json(payload);
+  } catch (e) {
     return res.status(500).json({ error: e.message });
   }
 });
