@@ -1754,7 +1754,7 @@ app.get('/api/v1/pipelines/:pipelineCode/connections', async (req, res) => {
   try {
     const result = await runQuery(
       `
-      MATCH (src:Location)-[r:CONNECTS_TO]->(dst:Location)
+      MATCH (src:Location)-[r:CONNECTS_TO]-(dst:Location)
       WHERE r.pipelineCode = $pipeline
       RETURN 
         src.name AS sourceName, src.locationId as sourceLocationId,
@@ -1859,7 +1859,7 @@ app.get('/api/v1/pipelines/:pipelineCode/contracts/with-capacity-and-constraints
       MATCH (cs)-[:PRIMARY_DELIVERY]->(del:Location)
 
       // Find shortest path between receipt and delivery
-      OPTIONAL MATCH path = shortestPath((rec)-[:CONNECTS_TO*..200]->(del))
+      OPTIONAL MATCH path = shortestPath((rec)-[:CONNECTS_TO*..200]-(del))
       
       // collect locations along the path that have constraints effective on asOfDate
       WITH tc, cs, rec, del,
@@ -2010,7 +2010,7 @@ app.get(
 
         MATCH (a:Location {pipelineCode: $pipelineCode, locationId: $fromLocationId})
         MATCH (b:Location {pipelineCode: $pipelineCode, locationId: $toLocationId})
-        MATCH p = shortestPath((a)-[:CONNECTS_TO*..200]->(b))
+        MATCH p = shortestPath((a)-[:CONNECTS_TO*..200]-(b))
 
         UNWIND range(0, size(relationships(p)) - 1) AS i
         WITH
@@ -2131,7 +2131,7 @@ app.get('/api/v1/pipelines/:pipelineCode/nominations/:flowDate(\\d{4}-\\d{2}-\\d
 
       CALL {
         WITH rcpt, dlv, dayStart, dayEnd
-        MATCH p = allShortestPaths( (rcpt)-[:CONNECTS_TO*]->(dlv) )
+        MATCH p = allShortestPaths( (rcpt)-[:CONNECTS_TO*]-(dlv) )
         UNWIND nodes(p) AS loc
         OPTIONAL MATCH (loc)-[:HAS_CONSTRAINT]->(c:Constraint)
           WHERE c.effectiveDatetime <= dayEnd AND c.endDatetime >= dayStart
@@ -2195,7 +2195,7 @@ app.get('/notices/constrained-noms/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req,
 
       CALL {
         WITH rcpt, dlv, dayStart, dayEnd
-        MATCH p = allShortestPaths( (rcpt)-[:CONNECTS_TO*]->(dlv) )
+        MATCH p = allShortestPaths( (rcpt)-[:CONNECTS_TO*]-(dlv) )
         UNWIND nodes(p) AS loc
         MATCH (loc)-[:HAS_CONSTRAINT]->(c:Constraint)
         WHERE c.effectiveDatetime <= dayEnd AND c.endDatetime >= dayStart   // time overlap
@@ -2270,7 +2270,7 @@ app.get('/notices/constrained-noms/:locationName/:beforeDate(\\d{4}-\\d{2}-\\d{2
 
       CALL {
         WITH rcpt, dlv, target
-        MATCH p = allShortestPaths( (rcpt)-[:CONNECTS_TO*]->(dlv) )
+        MATCH p = allShortestPaths( (rcpt)-[:CONNECTS_TO*]-(dlv) )
         WHERE target IN nodes(p)
         RETURN count(p) > 0 AS passesThroughTarget
       }
@@ -2698,7 +2698,7 @@ app.get('/api/v1/pipelines/:pipelineCode/prices/:startDate(\\d{4}-\\d{2}-\\d{2})
     const result = await runQuery(
       `
       MATCH (r:Region)-[hs:HAS_SYMBOL]->(s:Symbol)-[htd:HAS_TRADING_DAY]->(td:SymbolTradingDay)
-      WHERE r.pipelineCode = $pipelineCode AND td.date >= datetime($startDate) AND td.date <= datetime($endDate)
+      WHERE r.pipelineCode = $pipelineCode AND td.date >= date($startDate) AND td.date <= date($endDate)
       RETURN
         r as region,
         s as symbol,
@@ -2828,7 +2828,7 @@ app.get('/path', async (req, res) => {
   const atTime = at ? new Date(at).toISOString() : null;
 
   const cypher = atTime ?
-  `MATCH p = (a:Location {name: $from})-[:CONNECTS_TO${hopPattern}]->(b:Location {name: $to})
+  `MATCH p = (a:Location {name: $from})-[:CONNECTS_TO${hopPattern}]-(b:Location {name: $to})
    WITH p
    UNWIND nodes(p) AS loc
    OPTIONAL MATCH (loc)-[:HAS_CONSTRAINT]->(c:Constraint)
@@ -2837,7 +2837,7 @@ app.get('/path', async (req, res) => {
         [rel IN relationships(p) | rel {.*, id: id(rel), type: type(rel)}] AS rels
    RETURN locs AS nodes, rels AS relationships
   ` :
-  `MATCH p = (a:Location {name: $from})-[:CONNECTS_TO${hopPattern}]->(b:Location {name: $to})
+  `MATCH p = (a:Location {name: $from})-[:CONNECTS_TO${hopPattern}]-(b:Location {name: $to})
    RETURN [n IN nodes(p) | n {.*, id: id(n)}] AS nodes,
           [r IN relationships(p) | r {.*, id: id(r), type: type(r)}] AS relationships
   `;
