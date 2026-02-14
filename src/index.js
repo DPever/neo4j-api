@@ -81,6 +81,14 @@ const swaggerOptions = {
             sortOrder: { type: 'integer', description: 'Sort order for visual display' }
           }
         },
+        Segment: {
+          type: 'object',
+          properties: {
+            pipelineCode: { type: 'string', description: 'Pipeline code this segment belongs to' },
+            name: { type: 'string', description: 'Segment name' },
+            pipelineSegmentCode: { type: 'string', description: 'Pipeline segment code for this segment' }
+          }
+        },
         LocationType: {
           type: 'object',
           properties: {
@@ -374,6 +382,38 @@ swaggerSpec.paths = {
     }
   },
 
+  '/api/v1/pipelines/{pipelineCode}/segments': {
+    get: {
+      summary: 'Segments for a pipeline',
+      tags: ['Reference Data'],
+      parameters: [
+        { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, 
+          description: 'Filter by pipeline name (e.g., ANR, TETCO)'
+        }
+      ],
+      responses: {
+        200: {
+          description: 'Found',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  count: { type: 'integer' },
+                  segments : {
+                    type:'array',
+                    items:{ $ref:'#/components/schemas/Segment'}
+                  }
+                }
+              }
+            }
+          }
+        },
+        404:{ description:'Not found'}
+      }
+    }
+  },
+
   '/api/v1/location-types': {
     get: {
       summary: 'List of location types',
@@ -608,6 +648,34 @@ swaggerSpec.paths = {
       responses: {
         200: {
           description: 'Firm Transportation Contracts with Capacity and Constraints',
+          content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              params: { type: 'object' },
+              count: { type: 'integer' },
+              contracts: { type: 'array', items: { type: 'object' } }
+            }
+          } } }
+        }
+      }
+    }
+  },
+
+  '/api/v1/pipelines/{pipelineCode}/contracts/{contractId}/path-with-segments': {
+    get: {
+      summary: 'Antero firm transportation with segments and location by location path for a contract and as of date',
+      tags: ['API'],
+      parameters: [
+        { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
+        { name: 'contractId', in: 'path', required: true, schema: { type: 'string' }, example: '125082', description: 'Contract ID to get path for. If "ALL" then all FT contracts for the pipeline are returned.' },
+        { name: 'asOfDate', in: 'query', required: true, 
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2026-02-13'
+        }
+      ],
+      responses: {
+        200: {
+          description: 'Firm Transportation Contracts with Segement and Location by Location Path',
           content: { 'application/json': { schema: {
             type: 'object',
             properties: {
@@ -1374,6 +1442,44 @@ app.get('/api/v1/pipelines/:pipelineCode/zones', async (req, res) => {
   }
 });
 
+// GET /api/v1/pipelines/:pipelineCode/segments  — fetch all segments for a given pipeline
+// Example: /api/v1/pipelines/ANR/segments
+app.get('/api/v1/pipelines/:pipelineCode/segments', async (req, res) => {
+  const pipeline = req.params.pipelineCode;
+
+  // Basic input validation
+  if (!pipeline || typeof pipeline !== 'string') {
+    return res.status(400).json({ error: "pipeline is required" });
+  }
+  try {
+    const result = await runQuery(
+      `
+      MATCH (s:Segment)
+      WHERE s.pipelineCode = $pipeline
+      RETURN
+        s.pipelineCode AS pipelineCode,
+        s.name         AS name,
+        s.pipelineSegmentCode AS pipelineSegmentCode
+      ORDER BY s.sortOrder
+      `,
+      { pipeline }
+    );
+
+    // Map records to plain JS objects
+    const segments = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    res.json({ count: segments.length, pipeline,  segments });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/v1/location-types  — fetch all location types
 app.get('/api/v1/location-types', async (req, res) => {
   try {
@@ -1754,7 +1860,7 @@ app.get('/api/v1/pipelines/:pipelineCode/connections', async (req, res) => {
   try {
     const result = await runQuery(
       `
-      MATCH (src:Location)-[r:CONNECTS_TO]-(dst:Location)
+      MATCH (src:Location)-[r:CONNECTS_TO]->(dst:Location)
       WHERE r.pipelineCode = $pipeline
       RETURN 
         src.name AS sourceName, src.locationId as sourceLocationId,
@@ -1859,7 +1965,7 @@ app.get('/api/v1/pipelines/:pipelineCode/contracts/with-capacity-and-constraints
       MATCH (cs)-[:PRIMARY_DELIVERY]->(del:Location)
 
       // Find shortest path between receipt and delivery
-      OPTIONAL MATCH path = shortestPath((rec)-[:CONNECTS_TO*..200]-(del))
+      OPTIONAL MATCH path = shortestPath((rec)-[:CONNECTS_TO*..200]->(del))
       
       // collect locations along the path that have constraints effective on asOfDate
       WITH tc, cs, rec, del,
@@ -1986,6 +2092,205 @@ app.get('/api/v1/pipelines/:pipelineCode/contracts/with-capacity-and-constraints
   }
 });
 
+// GET /api/v1/pipelines/:pipelineCode/contracts/:contractId/path-with-segments — fetch Antero's firm transport with path segments info
+// Example: /api/v1/pipelines/ANR/contracts/125082/path-with-segments?asOfDate=2025-11-01
+app.get('/api/v1/pipelines/:pipelineCode/contracts/:contractId/path-with-segments', async (req, res) => {
+  const pipeline = req.params.pipelineCode;
+  const contractId = req.params.contractId;
+  const asOfDate = req.query.asOfDate;
+
+  // Basic input validation
+  if (!asOfDate || !/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) {
+    return res.status(400).json({ error: "asOfDate is required and must be in YYYY-MM-DD format" });
+  }
+
+  // if contractId = 'ALL', ignore contractId filter and return all contracts for the pipeline; otherwise filter by contractId
+  const contractMatch = contractId === 'ALL' ? 'MATCH (tc:TransportationContract {pipelineCode: $pipeline})' :
+   `MATCH (tc:TransportationContract {pipelineCode: $pipeline, contractId: $contractId})`;
+
+  const cypher = `
+      ${contractMatch}
+      MATCH (tc)-[:HAS_SEASON]->(cs:ContractSeason)
+      WHERE tc.rateSchedule STARTS WITH 'FT'  // only firm transport
+        AND tc.effectiveDate <= date($asOfDate) <= tc.endDate AND cs.effectiveDate <=  date($asOfDate) <= cs.endDate
+        
+      MATCH (cs)-[:PRIMARY_RECEIPT]->(rec:Location)
+      MATCH (cs)-[:PRIMARY_DELIVERY]->(del:Location)
+
+      // Find shortest path between receipt and delivery
+      OPTIONAL MATCH p = shortestPath((rec)-[:CONNECTS_TO*..200]->(del))
+      WITH tc, cs, rec, del, p
+      WHERE p IS NOT NULL
+      WITH tc, cs, rec, del, nodes(p) AS locs
+
+      // ordered location maps with idx
+      WITH tc, cs, rec, del, 
+        [i IN range(0, size(locs)-1) |
+          {
+            idx: i,
+            locationId: locs[i].locationId,
+            name: locs[i].name,
+            pipelineSegmentCode: locs[i].pipelineSegmentCode
+          }
+        ] AS orderedLocs
+
+      // build a parallel list of group ids (gid) that increments when segmentCode changes
+      WITH tc, cs, rec, del, orderedLocs,
+          reduce(gids = [], i IN range(0, size(orderedLocs)-1) |
+            gids + [
+              CASE
+                WHEN i = 0 THEN 0
+                WHEN orderedLocs[i].pipelineSegmentCode = orderedLocs[i-1].pipelineSegmentCode THEN last(gids)
+                ELSE last(gids) + 1
+              END
+            ]
+          ) AS gids
+
+      UNWIND range(0, size(orderedLocs)-1) AS i
+      WITH tc, cs, rec, del, orderedLocs[i] AS loc, gids[i] AS gid
+
+      // collect contiguous runs by gid
+      WITH tc, cs, rec, del,
+        gid,
+        collect(loc) AS locList,
+        head(collect(loc.pipelineSegmentCode)) AS segCode,
+        min(loc.idx) AS firstIdx
+      ORDER BY firstIdx
+
+      // attach Segment nodes (NOTE: your Segment property is pipelineSegmentCode)
+      CALL (segCode) {
+        WITH segCode
+        // Null segmentCode => Unsegmented
+        WITH segCode
+        WHERE segCode IS NULL
+        RETURN [{segmentCode: null, name: "Unsegmented"}] AS segs
+
+        UNION
+
+        WITH segCode
+        WHERE segCode IS NOT NULL
+        OPTIONAL MATCH (s:Segment {pipelineCode: $pipeline, pipelineSegmentCode: segCode})
+        WITH segCode, s
+        ORDER BY s.name
+        WITH segCode, collect(DISTINCT {segmentCode: segCode, name: s.name}) AS found
+        RETURN
+          CASE
+            WHEN size(found) = 0 THEN [{segmentCode: null, name: "Unsegmented"}]
+            ELSE found
+          END AS segs
+      }
+
+      WITH tc, cs, rec, del, collect({segments: segs, locations: locList}) AS groups
+
+      // segmentsOnPath: dedupe in first-appearance order
+      WITH tc, cs, rec, del, groups,
+          reduce(out = [], grp IN groups |
+            reduce(out2 = out, s IN grp.segments |
+              CASE WHEN any(x IN out2 WHERE x.segmentCode = s.segmentCode AND x.name = s.name)
+                    THEN out2
+                    ELSE out2 + [s]
+              END
+            )
+          ) AS segmentsOnPath
+
+      RETURN 
+        tc.pipelineCode       AS pipelineCode,
+        tc.shipperName        AS shipperName,
+        tc.rateSchedule       AS rateSchedule,
+        tc.contractId         AS contractId,
+        tc.effectiveDate      AS contractEffectiveDate,
+        tc.endDate            AS contractEndDate,
+        tc.baseMDQ            AS baseMDQ,
+        tc.flowUnit           AS flowUnit,
+        cs.seasonId           AS seasonId,
+        cs.effectiveDate      AS seasonEffectiveFrom,
+        cs.endDate            AS seasonEffectiveTo,
+        cs.mdq                AS mdq,
+        rec.name              AS primaryReceipt,
+        rec.locationId        AS primaryReceiptLocationId,
+        del.name              AS primaryDelivery,
+        del.locationId        AS primaryDeliveryLocationId,
+        groups, segmentsOnPath;
+      `;
+
+  try {
+    const result = await runQuery(
+      cypher,
+      { pipeline, contractId, asOfDate }
+    );
+
+    // Map records to plain JS objects
+    const contracts = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    // 1) collect unique locationIds from the response
+    const uniqueLocationIds = new Set();
+    for (const c of contracts) {
+      for (const g of (c.groups ?? [])) {
+        for (const loc of (g.locations ?? [])) {
+          if (loc?.locationId) uniqueLocationIds.add(String(loc.locationId));
+        }
+      }
+    }
+
+    const ids = [...uniqueLocationIds];
+
+    // 2) fetch capacity once per locationId (RPQ + DPQ), concurrency-limited
+    const capacityPairs = await mapWithConcurrency(
+      ids,
+      5, // tune 5-10 depending on Aura behavior
+      async (locationId) => {
+        const [rpqRes, dpqRes] = await Promise.all([
+          getCapacityAndUtilizationAtLocation(pipeline, locationId, 'RPQ', asOfDate, 1)
+            .catch(() => ({ capacity: [] })), // don’t fail the whole request
+          getCapacityAndUtilizationAtLocation(pipeline, locationId, 'DPQ', asOfDate, 1)
+            .catch(() => ({ capacity: [] }))
+        ]);
+
+        return {
+          locationId,
+          // attach whichever shape your helper returns (example assumes {capacity:[...]} )
+          rpq: rpqRes.capacity?.[0] ?? null,
+          dpq: dpqRes.capacity?.[0] ?? null
+        };
+      }
+    );
+
+    // 3) build lookup
+    const capacityByLocationId = new Map(
+      capacityPairs.map(x => [x.locationId, { rpq: x.rpq, dpq: x.dpq }])
+    );
+
+    // 4) enrich each location in-place (or return new objects if you prefer immutability)
+    const enrichedContracts = contracts.map(c => ({
+      ...c,
+      groups: (c.groups ?? []).map(g => ({
+        ...g,
+        locations: (g.locations ?? []).map(loc => {
+          const cap = capacityByLocationId.get(String(loc.locationId)) ?? { rpq: null, dpq: null };
+          return {
+            ...loc,
+            capacity: cap
+            // or if you prefer flatter:
+            // rpqCapacity: cap.rpq,
+            // dpqCapacity: cap.dpq
+          };
+        })
+      }))
+    }));
+
+    // return enrichedContracts instead of contracts
+    res.json({ params: { pipeline, contractId, asOfDate }, count: enrichedContracts.length, contracts: enrichedContracts });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/v1/pipelines/:pipelineCode/path-details/:fromLocationId/:toLocationId/:asOfDate
 // Example: /api/v1/pipelines/ANR/path-details/513105/42078/2025-11-01
 app.get(
@@ -2010,7 +2315,7 @@ app.get(
 
         MATCH (a:Location {pipelineCode: $pipelineCode, locationId: $fromLocationId})
         MATCH (b:Location {pipelineCode: $pipelineCode, locationId: $toLocationId})
-        MATCH p = shortestPath((a)-[:CONNECTS_TO*..200]-(b))
+        MATCH p = shortestPath((a)-[:CONNECTS_TO*..200]->(b))
 
         UNWIND range(0, size(relationships(p)) - 1) AS i
         WITH
@@ -2038,6 +2343,7 @@ app.get(
             locationId: fromLoc.locationId,
             name:   fromLoc.name,
             zone:   fromLoc.zone,
+            pipelineSegmentCode: fromLoc.pipelineSegmentCode,
             type:   fromLoc.type,
             area:   fromLoc.area,
             direction: fromLoc.direction,
@@ -2048,6 +2354,7 @@ app.get(
             locationId: toLoc.locationId,
             name:   toLoc.name,
             zone:   toLoc.zone,
+            pipelineSegmentCode: toLoc.pipelineSegmentCode,
             type:   toLoc.type,
             area:   toLoc.area,
             direction: toLoc.direction,
@@ -2131,7 +2438,7 @@ app.get('/api/v1/pipelines/:pipelineCode/nominations/:flowDate(\\d{4}-\\d{2}-\\d
 
       CALL {
         WITH rcpt, dlv, dayStart, dayEnd
-        MATCH p = allShortestPaths( (rcpt)-[:CONNECTS_TO*]-(dlv) )
+        MATCH p = allShortestPaths( (rcpt)-[:CONNECTS_TO*]->(dlv) )
         UNWIND nodes(p) AS loc
         OPTIONAL MATCH (loc)-[:HAS_CONSTRAINT]->(c:Constraint)
           WHERE c.effectiveDatetime <= dayEnd AND c.endDatetime >= dayStart
@@ -2195,7 +2502,7 @@ app.get('/notices/constrained-noms/:flowDate(\\d{4}-\\d{2}-\\d{2})', async (req,
 
       CALL {
         WITH rcpt, dlv, dayStart, dayEnd
-        MATCH p = allShortestPaths( (rcpt)-[:CONNECTS_TO*]-(dlv) )
+        MATCH p = allShortestPaths( (rcpt)-[:CONNECTS_TO*]->(dlv) )
         UNWIND nodes(p) AS loc
         MATCH (loc)-[:HAS_CONSTRAINT]->(c:Constraint)
         WHERE c.effectiveDatetime <= dayEnd AND c.endDatetime >= dayStart   // time overlap
@@ -2270,7 +2577,7 @@ app.get('/notices/constrained-noms/:locationName/:beforeDate(\\d{4}-\\d{2}-\\d{2
 
       CALL {
         WITH rcpt, dlv, target
-        MATCH p = allShortestPaths( (rcpt)-[:CONNECTS_TO*]-(dlv) )
+        MATCH p = allShortestPaths( (rcpt)-[:CONNECTS_TO*]->(dlv) )
         WHERE target IN nodes(p)
         RETURN count(p) > 0 AS passesThroughTarget
       }
@@ -2828,7 +3135,7 @@ app.get('/path', async (req, res) => {
   const atTime = at ? new Date(at).toISOString() : null;
 
   const cypher = atTime ?
-  `MATCH p = (a:Location {name: $from})-[:CONNECTS_TO${hopPattern}]-(b:Location {name: $to})
+  `MATCH p = (a:Location {name: $from})-[:CONNECTS_TO${hopPattern}]->(b:Location {name: $to})
    WITH p
    UNWIND nodes(p) AS loc
    OPTIONAL MATCH (loc)-[:HAS_CONSTRAINT]->(c:Constraint)
@@ -2837,7 +3144,7 @@ app.get('/path', async (req, res) => {
         [rel IN relationships(p) | rel {.*, id: id(rel), type: type(rel)}] AS rels
    RETURN locs AS nodes, rels AS relationships
   ` :
-  `MATCH p = (a:Location {name: $from})-[:CONNECTS_TO${hopPattern}]-(b:Location {name: $to})
+  `MATCH p = (a:Location {name: $from})-[:CONNECTS_TO${hopPattern}]->(b:Location {name: $to})
    RETURN [n IN nodes(p) | n {.*, id: id(n)}] AS nodes,
           [r IN relationships(p) | r {.*, id: id(r), type: type(r)}] AS relationships
   `;
