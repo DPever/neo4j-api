@@ -2228,6 +2228,7 @@ app.get('/api/v1/pipelines/:pipelineCode/contracts/:contractId/path-with-segment
       return obj;
     });
 
+    // === CAPACITY ENRICHMENT ===
     // 1) collect unique locationIds from the response
     const uniqueLocationIds = new Set();
     for (const c of contracts) {
@@ -2254,7 +2255,6 @@ app.get('/api/v1/pipelines/:pipelineCode/contracts/:contractId/path-with-segment
 
         return {
           locationId,
-          // attach whichever shape your helper returns (example assumes {capacity:[...]} )
           rpq: rpqRes.capacity?.[0] ?? null,
           dpq: dpqRes.capacity?.[0] ?? null
         };
@@ -2266,8 +2266,8 @@ app.get('/api/v1/pipelines/:pipelineCode/contracts/:contractId/path-with-segment
       capacityPairs.map(x => [x.locationId, { rpq: x.rpq, dpq: x.dpq }])
     );
 
-    // 4) enrich each location in-place (or return new objects if you prefer immutability)
-    const enrichedContracts = contracts.map(c => ({
+    // 4) enrich each location in-place with capacity info
+    const contractsWithLocationCapacity = contracts.map(c => ({
       ...c,
       groups: (c.groups ?? []).map(g => ({
         ...g,
@@ -2282,6 +2282,49 @@ app.get('/api/v1/pipelines/:pipelineCode/contracts/:contractId/path-with-segment
           };
         })
       }))
+    }));
+
+    // 5) Collect unique, usable segment names from segmentsOnPath
+    const uniqueSegmentNames = new Set();
+    for (const c of contracts) {
+      for (const seg of (c.segmentsOnPath ?? [])) {
+        const name = seg?.name;
+        if (name && String(name).trim()) uniqueSegmentNames.add(String(name).trim());
+      }
+    }
+
+    const segmentNames = [...uniqueSegmentNames];
+
+    // 6) Fetch capacity once per segmentName, concurrency-limited
+    const segmentCaps = await mapWithConcurrency(
+      segmentNames,
+      5, // tune 5-10 depending on Aura behavior
+      async (segmentName) => {
+        const res = await getCapacityAndUtilizationOnSegment(pipeline, segmentName, asOfDate, 1)
+          .catch(() => ({ capacity: [] })); // don’t fail the whole request
+
+        return {
+          segmentName,
+          sgq: res.capacity?.[0] ?? null
+        };
+      }
+    );
+
+    // 7) Build lookup
+    const capacityBySegmentName = new Map(
+      segmentCaps.map(x => [x.segmentName, x.sgq])
+    );
+
+    // 8) Enrich segmentsOnPath with capacity info
+    const enrichedContracts = contractsWithLocationCapacity.map(c => ({
+      ...c,
+        segmentsOnPath: (c.segmentsOnPath ?? []).map(seg => {
+          const name = seg?.name ? String(seg.name).trim() : null;
+          return {
+            ...seg,
+            capacity: name ? (capacityBySegmentName.get(name) ?? null) : null
+          };
+        })
     }));
 
     // return enrichedContracts instead of contracts
@@ -2866,16 +2909,38 @@ app.put('/api/v1/pipelines/:pipelineCode/capacities/operationally-available', as
         oac.updatedAt = datetime()
     )
 
-    WITH row, oac, shouldUpdate
+    // Relationship building to Location or Segment based on locQTI
+    WITH row, oac, shouldUpdate, locQTI
+
+    // Location match only relevant for RPQ/DPQ
     OPTIONAL MATCH (l:Location)
-    WHERE l.pipelineCode = row.pipelineCode
+    WHERE locQTI IN ['RPQ','DPQ']
+      AND l.pipelineCode = row.pipelineCode
       AND (
         l.locationId = row.locationId
         OR l.name = row.locationName
       )
 
-    FOREACH (_ IN CASE WHEN l IS NULL OR NOT shouldUpdate THEN [] ELSE [1] END |
+    // Segment match only relevant for SGQ
+    OPTIONAL MATCH (s:Segment)
+    WHERE locQTI = 'SGQ'
+      AND s.pipelineCode = row.pipelineCode
+      AND s.name = row.locationName
+
+    // Create Location relationship only for RPQ/DPQ rows
+    FOREACH (_ IN CASE
+        WHEN shouldUpdate AND locQTI IN ['RPQ','DPQ'] AND l IS NOT NULL THEN [1]
+        ELSE []
+      END |
       MERGE (l)-[:HAS_AVAILABLE_CAPACITY]->(oac)
+    )
+
+    // Create Segment relationship only for SGQ rows
+    FOREACH (_ IN CASE
+        WHEN shouldUpdate AND locQTI = 'SGQ' AND s IS NOT NULL THEN [1]
+        ELSE []
+      END |
+      MERGE (s)-[:HAS_AVAILABLE_CAPACITY]->(oac)
     )
 
     RETURN
@@ -3676,6 +3741,72 @@ async function getCapacityAndUtilizationAtLocation(
 
   return {
     params: { pipelineCode, locationId: locationId, locQTI, asOfDate },
+    count: capacity.length,
+    capacity
+  };
+}
+
+// Helper function to get capacity and utilization on a segment
+async function getCapacityAndUtilizationOnSegment(
+  pipelineCode,
+  segmentName,
+  asOfDate,
+  limit = 100 // default limit far exceeds the number of expected results
+) {
+
+  const result = await runQuery(
+    `
+    MATCH (s:Segment)
+    WHERE s.pipelineCode = $pipelineCode
+      AND s.name = $segmentName
+
+    MATCH (s)-[:HAS_AVAILABLE_CAPACITY]->(n:OperationallyAvailableCapacity)
+    WHERE n.locQTI = 'SGQ'
+      AND n.flowDate = date($asOfDate)
+
+    RETURN
+      n.pipelineCode                    AS pipelineCode,
+      n.locationId                      AS locationId,
+      n.locationName                    AS locationName,
+      n.flowDate                        AS flowDate,
+      n.cycle                           AS cycle,
+      n.designCapacity                  AS designCapacity,
+      n.operatingCapacity               AS operatingCapacity,
+      n.totalSchedQty                   AS totalSchedQty,
+      n.operationallyAvailableCapacity  AS operationallyAvailableCapacity,
+      CASE
+        WHEN n.operatingCapacity IS NULL OR n.operatingCapacity = 0 THEN NULL
+        ELSE 100.0 * n.operationallyAvailableCapacity / n.operatingCapacity
+      END                               AS availablePercent,
+      CASE
+        WHEN n.operatingCapacity IS NULL OR n.operatingCapacity = 0 THEN NULL
+        ELSE 100.0 * n.totalSchedQty / n.operatingCapacity
+      END                               AS utilizationPercent,
+      n.schedStatus                     AS schedStatus,
+      n.locQTI                          AS locQTI,
+      n.locPurpDesc                     AS locPurpDesc,
+      n.itIndicator                     AS itIndicator,
+      n.grossOrNet                      AS grossOrNet,
+      n.flowIndicator                   AS flowIndicator,
+      n.direction                       AS direction,
+      n.postingDate                     AS postingDatetime
+    ORDER BY n.postingDate DESC
+    LIMIT toInteger($limit);
+    `,
+    { pipelineCode, segmentName, asOfDate, limit }
+  );
+
+
+  const capacity = result.records.map(r => {
+    const obj = {};
+    for (const key of r.keys) {
+      obj[key] = toPlain(r.get(key));
+    }
+    return obj;
+  });
+
+  return {
+    params: { pipelineCode, segmentName, asOfDate },
     count: capacity.length,
     capacity
   };
