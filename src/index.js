@@ -2890,7 +2890,7 @@ app.put('/api/v1/pipelines/:pipelineCode/capacities/operationally-available', as
       oac.createdAt = datetime(),
       oac.postingDate = incomingPosting
 
-    WITH row, oac, incomingPosting, itIndicator,
+    WITH row, oac, incomingPosting, itIndicator, locQTI,
         CASE
           WHEN oac.postingDate IS NULL THEN true
           WHEN incomingPosting >= oac.postingDate THEN true
