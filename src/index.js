@@ -11,6 +11,7 @@ import {
 } from './validators/locationValidator.js';
 import { ValidationError } from './validators/common.js';
 import { validateOacBatch } from './validators/operationallyAvailableCapacityValidator.js'
+import { apiKeyGate } from './middleware/auth.middleware.js';
 
 
 // ---- Config ----
@@ -43,7 +44,6 @@ const swaggerOptions = {
     },
     servers: [
       { url: process.env.BASE_URL || `http://localhost:${PORT}` }
-      // add { url: 'https://<your-render-app>.onrender.com' } if you want a fixed server shown
     ],
     components: {
       securitySchemes: {
@@ -222,8 +222,8 @@ const swaggerOptions = {
           }
         }
       }
-    }
-    // , security: [{ ApiKeyHeader: [] }] // uncomment if you enforce x-api-key globally
+    },
+    security: [{ ApiKeyHeader: [] }] // enforce x-api-key globally
   },
   apis: [] // we’re building the spec entirely here (no JSDoc scanning yet)
 };
@@ -236,6 +236,7 @@ swaggerSpec.paths = {
     get: {
       summary: 'Health check',
       tags: ['System'],
+      security: [],
       responses: {
         200: {
           description: 'Service healthy',
@@ -269,9 +270,9 @@ swaggerSpec.paths = {
               }
             }
           }
-        }
-      },
-      404: { description: 'Not found' }
+        },
+        404: { description: 'Not found' }
+      }
     }
   },
 
@@ -1278,6 +1279,9 @@ app.get('/health', async (req, res) => {
     res.status(500).json({ status: 'error', error: e.message });
   }
 });
+
+// Protect everything under /api/v1 with a simple API key gate that we can replace with APIM in the future.
+app.use("/api/v1", apiKeyGate);
 
 // GET /api/v1/pipelines  — fetch all pipelines
 app.get('/api/v1/pipelines', async (req, res) => {
