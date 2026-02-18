@@ -561,6 +561,53 @@ swaggerSpec.paths = {
     },
   },
 
+  '/api/v1/pipelines/{pipelineCode}/locations-with-capacity': {
+    get: {
+      summary: 'Locations for a pipeline with capacity info for a given as of date and cycle (if provided)',
+      tags: ['Reference Data'],
+      parameters: [
+        { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, 
+          description: 'Filter by pipeline name (e.g., ANR, TETCO)'
+        },
+        { name: 'asOfDate', in: 'query', required: true, 
+          schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          example: '2025-11-01'
+        },
+        { name: 'cycle', in: 'query', required: false, schema: { type: 'string' }, example: 'EVE' },
+        { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 100 }, 
+          description: 'maximum number of locations to return', example: '100'
+        },
+        { name: 'skip', in: 'query', required: false, schema: { type: 'integer', default: 0 }, 
+          description: 'number of locations to skip for pagination', example: '0'
+        }
+      ],
+      responses: {
+        200: {
+          description: 'Found',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  count: { type: 'integer' },
+                  locations: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        location: { type: 'object' }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+
   '/api/v1/pipelines/{pipelineCode}/connections': {
     get: {
       summary: 'List of connections between locations for a pipeline',
@@ -1849,6 +1896,101 @@ app.put('/api/v1/pipelines/:pipelineCode/locations/:locationId', async (req, res
     return res.status(500).json({ error: e.message });
   }
 });
+
+// GET /api/v1/pipelines/:pipelineCode/locations-with-capacity?asOfDate=2025-11-01&cycle=EVE&limit=100&skip=0
+//   — fetch all Locations for a given pipeline and enrich with capacity data for the specified date and cycle
+// Example: /api/v1/pipelines/ANR/locations-with-capacity?asOfDate=2025-11-01&cycle=EVE&limit=50&skip=0
+app.get('/api/v1/pipelines/:pipelineCode/locations-with-capacity', async (req, res) => {
+  const pipeline = req.params.pipelineCode;
+  const asOfDate = req.query.asOfDate;
+  const cycle = req.query.cycle; // optional
+  const limit = parseInt(req.query.limit) || 1000;
+  const skip  = parseInt(req.query.skip)  || 0;
+
+  // Basic input validation
+  if (!pipeline || typeof pipeline !== 'string') {
+    return res.status(400).json({ error: "pipeline is required" });
+  }
+  if (asOfDate && !/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) {
+    return res.status(400).json({ error: "asOfDate must be in YYYY-MM-DD format" });
+  }
+  try {
+    const result = await runQuery(
+      `
+      MATCH (l:Location { pipelineCode: $pipeline })
+      WHERE l.effectiveDate <= date($asOfDate) AND (l.endDate IS NULL OR l.endDate >= date($asOfDate))
+      RETURN
+        l.pipelineCode AS pipelineCode,
+        l.locationId  AS locationId,
+        l.name        AS name,
+        l.direction   AS direction,
+        l.type        AS type,
+        l.zone        AS zone,
+        l.marketArea  AS marketArea,
+        l.effectiveDate AS effectiveDate,
+        l.endDate     AS endDate,
+        l.state       AS state,
+        l.county      AS county,
+        l.pipelineSegmentCode AS pipelineSegmentCode,
+        l.primaryDataSource AS primaryDataSource,
+        l.primaryDataAsOf AS primaryDataAsOf,
+        l.position AS position,
+        l.positionDataSource      AS positionDataSource,
+        l.positionDataAsOf        AS positionDataAsOf
+      ORDER BY l.pipelineCode, l.locationId SKIP toInteger($skip) LIMIT toInteger($limit)
+      `,
+      { pipeline, asOfDate, limit, skip }
+    );
+
+    // Map records to plain JS objects
+    const locations = result.records.map(r => {
+      const obj = {};
+      for (const key of r.keys) {
+        obj[key] = toPlain(r.get(key));
+      }
+      return obj;
+    });
+
+    // enrich with capacity data
+    const locationsWithCapacity = await mapWithConcurrency(
+      locations,
+      5, // keep modest — this doubles calls
+      async (l) => {
+        const [
+          receiptResult,
+          deliveryResult
+        ] = await Promise.all([
+          getCapacityAndUtilizationAtLocation(
+            pipeline,
+            l.locationId,
+            'RPQ',
+            asOfDate, 1, 
+            cycle // if cycle is provided, it will be used in the capacity query to fetch cycle-specific capacity and utilization; if not provided, it will fetch overall daily capacity and utilization for the date 
+          ),
+          getCapacityAndUtilizationAtLocation(
+            pipeline,
+            l.locationId,
+            'DPQ',
+            asOfDate, 1, cycle
+          )
+        ]);
+
+        return {
+          ...l,
+          capacity: {
+            rpq: receiptResult.capacity[0] ?? null,
+            dpq: deliveryResult.capacity[0] ?? null
+          }
+        };
+      }
+    );
+
+    res.json({ pipeline, count: locations.length, locations: locationsWithCapacity, page: { skip: Number(skip), limit: Number(limit) } });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 
 // GET /api/v1/pipelines/:pipelineCode/connections?limit=100&skip=0  — fetch all connections for a given pipeline w/ pagination
 // Example: /api/v1/pipelines/ANR/connections?limit=50&skip=0
@@ -3685,7 +3827,8 @@ async function getCapacityAndUtilizationAtLocation(
   locationId,
   locQTI,
   asOfDate,
-  limit = 100 // default limit far exceeds the number of expected results
+  limit = 100, // default limit far exceeds the number of expected results
+  cycle = null // optional cycle filter (e.g., 'TIM', 'EVE', 'ID1', etc.)
 ) {
   const locationNumberStr =
     typeof locationId === 'string'
@@ -3701,6 +3844,7 @@ async function getCapacityAndUtilizationAtLocation(
     MATCH (l)-[:HAS_AVAILABLE_CAPACITY]->(n:OperationallyAvailableCapacity)
     WHERE n.locQTI = $locQTI
       AND n.flowDate = date($asOfDate)
+      AND ($cycle IS NULL OR n.cycle = $cycle)
 
     RETURN
       n.pipelineCode                    AS pipelineCode,
@@ -3731,7 +3875,7 @@ async function getCapacityAndUtilizationAtLocation(
     ORDER BY n.postingDate DESC
     LIMIT toInteger($limit);
     `,
-    { pipelineCode, locationId, locQTI, asOfDate, limit }
+    { pipelineCode, locationId, locQTI, asOfDate, cycle, limit }
   );
 
 
