@@ -1903,7 +1903,7 @@ app.put('/api/v1/pipelines/:pipelineCode/locations/:locationId', async (req, res
 app.get('/api/v1/pipelines/:pipelineCode/locations-with-capacity', async (req, res) => {
   const pipeline = req.params.pipelineCode;
   const asOfDate = req.query.asOfDate;
-  const cycle = req.query.cycle; // optional
+  const cycle = req.query.cycle || null; // optional
   const limit = parseInt(req.query.limit) || 1000;
   const skip  = parseInt(req.query.skip)  || 0;
 
@@ -1917,29 +1917,112 @@ app.get('/api/v1/pipelines/:pipelineCode/locations-with-capacity', async (req, r
   try {
     const result = await runQuery(
       `
+      // 1) Page locations first
       MATCH (l:Location { pipelineCode: $pipeline })
-      WHERE l.effectiveDate <= date($asOfDate) AND (l.endDate IS NULL OR l.endDate >= date($asOfDate))
+      WHERE l.effectiveDate <= date($asOfDate)
+        AND (l.endDate IS NULL OR l.endDate >= date($asOfDate))
+      WITH l
+      ORDER BY l.pipelineCode, l.locationId
+      SKIP toInteger($skip)
+      LIMIT toInteger($limit)
+
+      WITH collect(l) AS locs, [x IN collect(l) | x.locationId] AS locIds
+
+      // 2) Pull capacity nodes by index, then join back to the paged locations via the relationship
+      CALL {
+        WITH locIds
+        MATCH (n:OperationallyAvailableCapacity)
+        WHERE n.pipelineCode = $pipeline
+          AND n.flowDate = date($asOfDate)
+          AND n.locQTI IN ['RPQ','DPQ']
+          AND ($cycle IS NULL OR n.cycle = $cycle)
+        MATCH (l:Location { pipelineCode: $pipeline })-[:HAS_AVAILABLE_CAPACITY]->(n)
+        WHERE l.locationId IN locIds
+        RETURN l.locationId AS lid, n.locQTI AS qti, n AS n
+      }
+
+      // 3) Pick latest per (lid, qti)
+      WITH locs, lid, qti, n
+      ORDER BY lid, qti, n.postingDate DESC
+      WITH locs, lid, qti, head(collect(n)) AS latest
+      WITH locs, collect({ lid: lid, qti: qti, n: latest }) AS caps
+
+      // 4) Stitch back onto each Location
+      UNWIND locs AS l
+      WITH l,
+          [c IN caps WHERE c.lid = l.locationId AND c.qti = 'RPQ' | c.n][0] AS rpqN,
+          [c IN caps WHERE c.lid = l.locationId AND c.qti = 'DPQ' | c.n][0] AS dpqN
+
       RETURN
         l.pipelineCode AS pipelineCode,
-        l.locationId  AS locationId,
-        l.name        AS name,
-        l.direction   AS direction,
-        l.type        AS type,
-        l.zone        AS zone,
-        l.marketArea  AS marketArea,
-        l.effectiveDate AS effectiveDate,
-        l.endDate     AS endDate,
-        l.state       AS state,
-        l.county      AS county,
+        l.locationId   AS locationId,
+        l.name         AS name,
+        l.direction    AS direction,
+        l.type         AS type,
+        l.zone         AS zone,
+        l.marketArea   AS marketArea,
+        toString(l.effectiveDate) AS effectiveDate,
+        CASE WHEN l.endDate IS NULL THEN NULL ELSE toString(l.endDate) END AS endDate,
+        l.state        AS state,
+        l.county       AS county,
         l.pipelineSegmentCode AS pipelineSegmentCode,
         l.primaryDataSource AS primaryDataSource,
-        l.primaryDataAsOf AS primaryDataAsOf,
-        l.position AS position,
-        l.positionDataSource      AS positionDataSource,
-        l.positionDataAsOf        AS positionDataAsOf
-      ORDER BY l.pipelineCode, l.locationId SKIP toInteger($skip) LIMIT toInteger($limit)
+        toString(l.primaryDataAsOf) AS primaryDataAsOf,
+        l.position     AS position,
+        l.positionDataSource AS positionDataSource,
+        CASE WHEN l.positionDataAsOf IS NULL THEN NULL ELSE toString(l.positionDataAsOf) END AS positionDataAsOf,
+        {
+          rpq: CASE WHEN rpqN IS NULL THEN NULL ELSE {
+            pipelineCode: rpqN.pipelineCode,
+            locationId:   rpqN.locationId,
+            locationName: rpqN.locationName,
+            flowDate:     toString(rpqN.flowDate),
+            cycle:        rpqN.cycle,
+            designCapacity: rpqN.designCapacity,
+            operatingCapacity: rpqN.operatingCapacity,
+            totalSchedQty: rpqN.totalSchedQty,
+            operationallyAvailableCapacity: rpqN.operationallyAvailableCapacity,
+            availablePercent: CASE WHEN rpqN.operatingCapacity IS NULL OR rpqN.operatingCapacity = 0 THEN NULL
+                                  ELSE 100.0 * rpqN.operationallyAvailableCapacity / rpqN.operatingCapacity END,
+            utilizationPercent: CASE WHEN rpqN.operatingCapacity IS NULL OR rpqN.operatingCapacity = 0 THEN NULL
+                                    ELSE 100.0 * rpqN.totalSchedQty / rpqN.operatingCapacity END,
+            schedStatus: rpqN.schedStatus,
+            locQTI: rpqN.locQTI,
+            locPurpDesc: rpqN.locPurpDesc,
+            itIndicator: rpqN.itIndicator,
+            grossOrNet: rpqN.grossOrNet,
+            flowIndicator: rpqN.flowIndicator,
+            direction: rpqN.direction,
+            postingDatetime: toString(rpqN.postingDate)
+          } END,
+          dpq: CASE WHEN dpqN IS NULL THEN NULL ELSE {
+            pipelineCode: dpqN.pipelineCode,
+            locationId:   dpqN.locationId,
+            locationName: dpqN.locationName,
+            flowDate:     toString(dpqN.flowDate),
+            cycle:        dpqN.cycle,
+            designCapacity: dpqN.designCapacity,
+            operatingCapacity: dpqN.operatingCapacity,
+            totalSchedQty: dpqN.totalSchedQty,
+            operationallyAvailableCapacity: dpqN.operationallyAvailableCapacity,
+            availablePercent: CASE WHEN dpqN.operatingCapacity IS NULL OR dpqN.operatingCapacity = 0 THEN NULL
+                                  ELSE 100.0 * dpqN.operationallyAvailableCapacity / dpqN.operatingCapacity END,
+            utilizationPercent: CASE WHEN dpqN.operatingCapacity IS NULL OR dpqN.operatingCapacity = 0 THEN NULL
+                                    ELSE 100.0 * dpqN.totalSchedQty / dpqN.operatingCapacity END,
+            schedStatus: dpqN.schedStatus,
+            locQTI: dpqN.locQTI,
+            locPurpDesc: dpqN.locPurpDesc,
+            itIndicator: dpqN.itIndicator,
+            grossOrNet: dpqN.grossOrNet,
+            flowIndicator: dpqN.flowIndicator,
+            direction: dpqN.direction,
+            postingDatetime: toString(dpqN.postingDate)
+          } END
+        } AS capacity
+
+      ORDER BY pipelineCode, locationId;
       `,
-      { pipeline, asOfDate, limit, skip }
+      { pipeline, asOfDate, cycle, limit, skip }
     );
 
     // Map records to plain JS objects
@@ -1951,41 +2034,7 @@ app.get('/api/v1/pipelines/:pipelineCode/locations-with-capacity', async (req, r
       return obj;
     });
 
-    // enrich with capacity data
-    const locationsWithCapacity = await mapWithConcurrency(
-      locations,
-      5, // keep modest — this doubles calls
-      async (l) => {
-        const [
-          receiptResult,
-          deliveryResult
-        ] = await Promise.all([
-          getCapacityAndUtilizationAtLocation(
-            pipeline,
-            l.locationId,
-            'RPQ',
-            asOfDate, 1, 
-            cycle // if cycle is provided, it will be used in the capacity query to fetch cycle-specific capacity and utilization; if not provided, it will fetch overall daily capacity and utilization for the date 
-          ),
-          getCapacityAndUtilizationAtLocation(
-            pipeline,
-            l.locationId,
-            'DPQ',
-            asOfDate, 1, cycle
-          )
-        ]);
-
-        return {
-          ...l,
-          capacity: {
-            rpq: receiptResult.capacity[0] ?? null,
-            dpq: deliveryResult.capacity[0] ?? null
-          }
-        };
-      }
-    );
-
-    res.json({ pipeline, count: locations.length, locations: locationsWithCapacity, page: { skip: Number(skip), limit: Number(limit) } });
+    res.json({ pipeline, asOfDate, cycle, count: locations.length, locations: locations, page: { skip: Number(skip), limit: Number(limit) } });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
