@@ -1936,7 +1936,14 @@ app.get('/api/v1/pipelines/:pipelineCode/locations-with-capacity', async (req, r
       MATCH (l:Location { pipelineCode: $pipeline })
       WHERE l.effectiveDate <= date($asOfDate)
         AND (l.endDate IS NULL OR l.endDate >= date($asOfDate))
-        AND ($hasPosition IS NULL OR ($hasPosition = 'true' AND l.position IS NOT NULL) OR ($hasPosition = 'false' AND l.position IS NULL))
+        AND (
+          $hasPosition IS NULL OR
+          ($hasPosition = 'true'  AND l.position IS NOT NULL) OR
+          ($hasPosition = 'false' AND l.position IS NULL)
+        )
+        AND EXISTS {
+          MATCH (l)-[:CONNECTS_TO]-(:Location)
+        }
       WITH l
       ORDER BY l.pipelineCode, l.locationId
       SKIP toInteger($skip)
