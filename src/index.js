@@ -12,6 +12,7 @@ import {
 import { ValidationError } from './validators/common.js';
 import { validateOacBatch } from './validators/operationallyAvailableCapacityValidator.js'
 import { apiKeyGate } from './middleware/auth.middleware.js';
+import { deprecate } from 'util';
 
 
 // ---- Config ----
@@ -574,6 +575,8 @@ swaggerSpec.paths = {
           example: '2025-11-01'
         },
         { name: 'cycle', in: 'query', required: false, schema: { type: 'string' }, example: 'EVE' },
+        { name: 'hasPosition', in: 'query', required: false, schema: { type: 'boolean' },
+          description: 'Filter by whether the location has a position defined or not', example: true },
         { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 100 }, 
           description: 'maximum number of locations to return', example: '100'
         },
@@ -680,9 +683,11 @@ swaggerSpec.paths = {
     }
   },
 
+  // DEPRECATED - to be removed in future releases
   '/api/v1/pipelines/{pipelineCode}/contracts/with-capacity-and-constraints': {
     get: {
-      summary: 'Antero firm transportation with capacity and constraints for a pipeline and as of date',
+      summary: 'DEPRECATED - Antero firm transportation with capacity and constraints for a pipeline and as of date',
+      deprecated: true,
       tags: ['API'],
       parameters: [
         { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
@@ -765,9 +770,11 @@ swaggerSpec.paths = {
     }
   },
   
+  // DEPRECATED - to be removed in future releases
   '/api/v1/pipelines/{pipelineCode}/nominations/{flowDate}': {
     get: {
-      summary: 'All nominations on a pipeline for a gas day',
+      summary: 'DEPRECATED - All nominations on a pipeline for a gas day',
+      deprecated: true,
       tags: ['Nominations'],
       parameters: [
         { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, 
@@ -926,9 +933,11 @@ swaggerSpec.paths = {
     },
   },
 
+  // DEPRECATED - to be removed in future releases
   '/api/v1/pipelines/{pipelineCode}/flows/{startDate}/{endDate}': {
     get: {
-      summary: 'Historic flow volumes and operational capacity at a location for a pipeline and date range',
+      summary: 'DEPRECATED - Historic flow volumes and operational capacity at a location for a pipeline and date range',
+      deprecated: true,
       tags: ['Volume'],
       parameters: [
         { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
@@ -1223,9 +1232,11 @@ swaggerSpec.paths = {
     }
   },
 
+  // DEPRECATED - to be removed in future releases
   '/api/v1/pipelines/{pipelineCode}/constraints': {
     get: {
-      summary: 'Constraints on a pipeline, optionally filtered by location and time',
+      summary: 'DEPRECATED - Constraints on a pipeline, optionally filtered by location and time',
+      deprecated: true,
       tags: ['Constraints'],
       parameters: [
         { name: 'pipelineCode', in: 'path', required: true, schema: { type: 'string' }, example: 'ANR' },
@@ -1904,6 +1915,7 @@ app.get('/api/v1/pipelines/:pipelineCode/locations-with-capacity', async (req, r
   const pipeline = req.params.pipelineCode;
   const asOfDate = req.query.asOfDate;
   const cycle = req.query.cycle || null; // optional
+  const hasPosition = req.query.hasPosition || null; // optional boolean
   const limit = parseInt(req.query.limit) || 1000;
   const skip  = parseInt(req.query.skip)  || 0;
 
@@ -1914,6 +1926,9 @@ app.get('/api/v1/pipelines/:pipelineCode/locations-with-capacity', async (req, r
   if (asOfDate && !/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) {
     return res.status(400).json({ error: "asOfDate must be in YYYY-MM-DD format" });
   }
+  if (hasPosition !== null && hasPosition !== 'true' && hasPosition !== 'false') {
+    return res.status(400).json({ error: "hasPosition must be 'true' or 'false'" });
+  }
   try {
     const result = await runQuery(
       `
@@ -1921,6 +1936,7 @@ app.get('/api/v1/pipelines/:pipelineCode/locations-with-capacity', async (req, r
       MATCH (l:Location { pipelineCode: $pipeline })
       WHERE l.effectiveDate <= date($asOfDate)
         AND (l.endDate IS NULL OR l.endDate >= date($asOfDate))
+        AND ($hasPosition IS NULL OR ($hasPosition = 'true' AND l.position IS NOT NULL) OR ($hasPosition = 'false' AND l.position IS NULL))
       WITH l
       ORDER BY l.pipelineCode, l.locationId
       SKIP toInteger($skip)
@@ -2022,7 +2038,7 @@ app.get('/api/v1/pipelines/:pipelineCode/locations-with-capacity', async (req, r
 
       ORDER BY pipelineCode, locationId;
       `,
-      { pipeline, asOfDate, cycle, limit, skip }
+      { pipeline, asOfDate, cycle, hasPosition, limit, skip }
     );
 
     // Map records to plain JS objects
@@ -2034,7 +2050,7 @@ app.get('/api/v1/pipelines/:pipelineCode/locations-with-capacity', async (req, r
       return obj;
     });
 
-    res.json({ pipeline, asOfDate, cycle, count: locations.length, locations: locations, page: { skip: Number(skip), limit: Number(limit) } });
+    res.json({ pipeline, asOfDate, cycle, hasPosition, count: locations.length, locations: locations, page: { skip: Number(skip), limit: Number(limit) } });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
